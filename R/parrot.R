@@ -440,17 +440,17 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
     } else if (method == "permutation") {
       if (verbose) message(sprintf("  Computing permutation p-value for CP %d...", i))
       pval_raw <- .permutation_pvalue(Y_combined, local_cp, lr_stat, 
-                                       result$Q, result$Q2, result$type, 
-                                       result$distribution, result$block_sigma,
-                                       n_perm = 100, verbose = verbose)
+                                      result$Q, result$Q2, result$type, 
+                                      result$distribution, result$block_sigma,
+                                      n_perm = 100, verbose = verbose)
       pval_method <- "permutation"
       
     } else if (method == "bootstrap") {
       if (verbose) message(sprintf("  Computing bootstrap p-value for CP %d...", i))
       pval_raw <- .bootstrap_pvalue(Y_combined, local_cp, lr_stat, null_fit,
-                                     result$Q, result$Q2, result$type,
-                                     result$distribution, result$block_sigma,
-                                     n_boot = 100, verbose = verbose)
+                                    result$Q, result$Q2, result$type,
+                                    result$distribution, result$block_sigma,
+                                    n_boot = 100, verbose = verbose)
       pval_method <- "bootstrap"
       
     } else {
@@ -489,7 +489,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
 #' Permutation test for CP p-value
 #' @keywords internal
 .permutation_pvalue <- function(Y, cp, observed_lr, Q, Q2, type, distribution, 
-                                 block_sigma, n_perm = 100, verbose = FALSE) {
+                                block_sigma, n_perm = 100, verbose = FALSE) {
   T_len <- dim(Y)[1]
   min_seg <- 3
   
@@ -533,7 +533,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
 #' Parametric bootstrap for CP p-value
 #' @keywords internal  
 .bootstrap_pvalue <- function(Y, cp, observed_lr, null_fit, Q, Q2, type, 
-                               distribution, block_sigma, n_boot = 100, verbose = FALSE) {
+                              distribution, block_sigma, n_boot = 100, verbose = FALSE) {
   T_len <- dim(Y)[1]
   N1 <- dim(Y)[2]
   N2 <- dim(Y)[3]
@@ -639,6 +639,54 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
   if (length(result$cps) == 0) return(list())
   min_seg <- as.integer(if (!is.null(result$min_segment)) result$min_segment else 3L)
   
+  # Ensure CI always contains the reported CP.
+  .ensure_cp_in_ci <- function(cp, ci_lower, ci_upper, ci_set = integer(0)) {
+    lo <- as.integer(min(ci_lower, cp))
+    hi <- as.integer(max(ci_upper, cp))
+    set <- as.integer(ci_set)
+    if (length(set) == 0) set <- seq.int(lo, hi)
+    if (!(cp %in% set)) set <- sort(unique(c(set, cp)))
+    list(lo = lo, hi = hi, set = set)
+  }
+  
+  # For single-CP runs, reuse the CI from detect_single_cp() to avoid
+  # stochastic re-fit drift between cp estimate and CI.
+  if (!isTRUE(result$multiple) &&
+      !is.null(result$detection_result) &&
+      inherits(result$detection_result, "cp_detection")) {
+    det <- result$detection_result
+    cp <- as.integer(result$cps[1])
+    
+    ci_lower <- cp
+    ci_upper <- cp
+    if (!is.null(det$ci) && length(det$ci) >= 2 &&
+        !is.na(det$ci[1]) && !is.na(det$ci[2])) {
+      ci_lower <- as.integer(det$ci[1])
+      ci_upper <- as.integer(det$ci[2])
+    }
+    
+    ci_set <- det$ci_set
+    if (is.null(ci_set) || length(ci_set) == 0) {
+      ci_set <- seq.int(ci_lower, ci_upper)
+    }
+    
+    fixed_ci <- .ensure_cp_in_ci(cp, ci_lower, ci_upper, ci_set)
+    ci_method <- if (!is.null(det$scan_method)) {
+      paste0(det$scan_method, "_reuse")
+    } else {
+      "profile_reuse"
+    }
+    
+    return(list(list(
+      cp = cp,
+      ci_lower = fixed_ci$lo,
+      ci_upper = fixed_ci$hi,
+      profile_ll = det$profile_ll,
+      ci_set = fixed_ci$set,
+      ci_method = ci_method
+    )))
+  }
+  
   # Fast path for score-scan mode: derive CI from score profile without per-split refits
   use_score_ci <- !is.null(result$scan_method) && identical(result$scan_method, "score")
   if (use_score_ci) {
@@ -695,13 +743,17 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
           
           ci_lower_local <- if (length(ci_set_local) > 0) min(ci_set_local) else local_cp
           ci_upper_local <- if (length(ci_set_local) > 0) max(ci_set_local) else local_cp
+          ci_lower_global <- left_start + ci_lower_local - 1L
+          ci_upper_global <- left_start + ci_upper_local - 1L
+          ci_set_global <- ci_set_local + left_start - 1L
+          fixed_ci <- .ensure_cp_in_ci(cp, ci_lower_global, ci_upper_global, ci_set_global)
           
           cis[[i]] <- list(
             cp = cp,
-            ci_lower = left_start + ci_lower_local - 1L,
-            ci_upper = left_start + ci_upper_local - 1L,
+            ci_lower = fixed_ci$lo,
+            ci_upper = fixed_ci$hi,
             profile_ll = profile_ll,
-            ci_set = ci_set_local + left_start - 1L,
+            ci_set = fixed_ci$set,
             ci_method = "score"
           )
         }
@@ -769,13 +821,15 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
     
     ci_lower <- left_start + ci_lower_local - 1
     ci_upper <- left_start + ci_upper_local - 1
+    ci_set_global <- ci_set + left_start - 1
+    fixed_ci <- .ensure_cp_in_ci(cp, ci_lower, ci_upper, ci_set_global)
     
     cis[[i]] <- list(
       cp = cp,
-      ci_lower = ci_lower,
-      ci_upper = ci_upper,
+      ci_lower = fixed_ci$lo,
+      ci_upper = fixed_ci$hi,
       profile_ll = profile_ll,
-      ci_set = ci_set + left_start - 1,
+      ci_set = fixed_ci$set,
       ci_method = "profile"
     )
   }

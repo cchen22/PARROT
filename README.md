@@ -25,7 +25,7 @@ Then load the package:
 library(PARROT)
 ```
 
-## Quick Start: Single Change Point
+## Quick Start: Single Change Point (Permutation P-value)
 
 ```r
 library(PARROT)
@@ -34,9 +34,9 @@ set.seed(1)
 
 # Simulate a unipartite Bernoulli network with one change point
 sim <- simulate_sbm_cp(
-  N = 30,
-  T_len = 60,
-  cp_time = 30,
+  N = 24,
+  T_len = 40,
+  cp_time = 20,
   Q = 2,
   type = "unipartite",
   distribution = "bernoulli",
@@ -44,61 +44,29 @@ sim <- simulate_sbm_cp(
   theta2 = list(prob = matrix(c(0.2, 0.8, 0.8, 0.2), 2, 2))
 )
 
-# Detect change point (single-CP mode)
+# Detect a single change point and compute permutation p-value
 fit <- parrot(
   Y = sim$Y,
   Q = 2,
   multiple = FALSE,
-  compute_cis = TRUE,
+  compute_cis = FALSE,
   compute_pvalues = TRUE,
-  pvalue_method = "wilks"
+  pvalue_method = "permutation"
 )
 
 print(fit)
-summary(fit)
+
+# Inspect permutation p-value for the detected change point
+if (length(fit$pvalues) > 0) {
+  fit$pvalues[[1]][c("cp", "pvalue_method", "pvalue_raw", "pvalue_bonferroni")]
+}
+
 plot(fit)
-```
-
-## Quick Start: Multiple Change Points
-
-```r
-library(PARROT)
-
-set.seed(2)
-
-theta1 <- list(prob = matrix(c(0.8, 0.2, 0.2, 0.8), 2, 2))
-theta2 <- list(prob = matrix(c(0.5, 0.5, 0.5, 0.5), 2, 2))
-theta3 <- list(prob = matrix(c(0.2, 0.8, 0.8, 0.2), 2, 2))
-
-sim_multi <- simulate_sbm_multi_cp(
-  N = 30,
-  T_len = 90,
-  cp_times = c(30, 60),
-  Q = 2,
-  type = "unipartite",
-  distribution = "bernoulli",
-  theta_list = list(theta1, theta2, theta3)
-)
-
-fit_multi <- parrot(
-  Y = sim_multi$Y,
-  Q = 2,
-  multiple = TRUE,
-  method = "wbs",          # alternatives: "bs", "pelt"
-  scan_method = "profile", # faster approximation: "score"
-  max_cps = 5,
-  compute_cis = TRUE,
-  compute_pvalues = FALSE
-)
-
-print(fit_multi)
-plot(fit_multi)
 ```
 
 ## Common Arguments
 
-- `multiple`: `FALSE` for single-CP, `TRUE` for multiple-CP.
-- `method`: multiple-CP search method (`"wbs"`, `"bs"`, `"pelt"`).
+- `multiple`: use `FALSE` for fast single-CP detection.
 - `scan_method`: candidate split scan (`"profile"` or faster `"score"`).
 - `compute_cis`: compute confidence intervals.
 - `compute_pvalues`: compute p-values for detected change points.
@@ -110,4 +78,3 @@ If you use PARROT in your research, please cite the corresponding manuscript
 and repository:
 
 - Repository: https://github.com/cchen22/PARROT
-- Manuscript: 
