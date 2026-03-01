@@ -1,0 +1,58 @@
+useDynLib(PARROT, .registration = TRUE)
+importFrom(Rcpp, evalCpp)
+import(stats)
+import(graphics)
+import(grDevices)
+
+# =============================================================================
+# MAIN FUNCTION
+# =============================================================================
+export(parrot)
+
+# =============================================================================
+# SIMULATION (simulate.R)
+# =============================================================================
+export(simulate_sbm)
+export(simulate_sbm_cp)
+export(simulate_sbm_multi_cp)
+
+# =============================================================================
+# SBM FITTING (fit_sbm.R)
+# =============================================================================
+export(fit_sbm)
+export(fit_sbm_segment)
+
+# =============================================================================
+# CHANGE POINT DETECTION (detect_cp.R)
+# Methods: WBS (default), BS, PELT
+# =============================================================================
+export(detect_single_cp)
+export(detect_multiple_cp)
+
+# =============================================================================
+# STATISTICAL INFERENCE (inference.R)
+# =============================================================================
+export(compute_pvalue)
+export(adjust_pvalues)
+export(test_significance)
+export(profile_likelihood_ci)
+
+# =============================================================================
+# VISUALIZATION (plot.R)
+# =============================================================================
+export(plot_profile)
+export(plot_detection)
+export(plot_network_heatmap)
+export(plot_network_evolution)
+export(plot_segment_params)
+
+# =============================================================================
+# S3 METHODS
+# =============================================================================
+S3method(print, parrot_result)
+S3method(summary, parrot_result)
+S3method(plot, parrot_result)
+S3method(print, sbm_fit)
+S3method(print, cp_detection)
+S3method(print, multi_cp_detection)
+S3method(print, cp_significance_test)
