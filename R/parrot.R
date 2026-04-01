@@ -27,6 +27,7 @@
 #' @param n_init Number of random initializations (default: 5)
 #' @param max_iter Maximum VEM iterations (default: 100)
 #' @param n_intervals Number of random intervals for WBS (default: 100)
+#' @param n_perm Number of permutations for permutation/bootstrap p-values (default: 100)
 #' @param compute_pvalues Compute p-values (default: FALSE; adds extra fits)
 #' @param compute_cis Compute confidence intervals (default: TRUE; adds extra fits)
 #' @param compute_inference Deprecated: sets both compute_pvalues and compute_cis
@@ -61,6 +62,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
                    n_init = 5,
                    max_iter = 100,
                    n_intervals = 100,
+                   n_perm = 100,
                    compute_pvalues = FALSE,
                    compute_cis = TRUE,
                    compute_inference = NULL,
@@ -234,7 +236,8 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
   if (compute_pvalues && length(cps) > 0) {
     if (verbose) message("Computing p-values...")
     # Compute p-values using internal function (supports permutation/bootstrap)
-    result$pvalues <- .compute_pvalues_for_parrot(result, pvalue_method, verbose)
+    result$pvalues <- .compute_pvalues_for_parrot(result, pvalue_method, verbose,
+                                                  n_perm = n_perm)
   }
   
   if (compute_cis && length(cps) > 0) {
@@ -368,7 +371,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
 #' Compute p-values for parrot result
 #' @keywords internal
 .compute_pvalues_for_parrot <- function(result, method, verbose,
-                                       n_perm = 100, permutation_scope = "local") {
+                                        n_perm = 100, permutation_scope = "local") {
   
   if (length(result$cps) == 0) return(list())
   n_perm <- as.integer(n_perm[1])
@@ -455,7 +458,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
     perm_scope_used <- NA_character_
     perm_space_size <- NA_real_
     perm_n_used <- NA_integer_
-
+    
     if (method == "wilks") {
       pval_raw <- pchisq(lr_stat, df = df, lower.tail = FALSE)
       pval_method <- "wilks"
@@ -484,9 +487,9 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
     } else if (method == "bootstrap") {
       if (verbose) message(sprintf("  Computing bootstrap p-value for CP %d...", i))
       pval_raw <- .bootstrap_pvalue(Y_combined, local_cp, lr_stat, null_fit,
-                                     result$Q, result$Q2, result$type,
-                                     result$distribution, result$block_sigma,
-                                     n_boot = 100, verbose = verbose)
+                                    result$Q, result$Q2, result$type,
+                                    result$distribution, result$block_sigma,
+                                    n_boot = 100, verbose = verbose)
       pval_method <- "bootstrap"
       
     } else {
@@ -528,29 +531,29 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
 #' Permutation test for CP p-value
 #' @keywords internal
 .permutation_pvalue <- function(Y, cp, observed_lr, Q, Q2, type, distribution, 
-                                 block_sigma, n_perm = 100, scope = "local",
-                                 Y_full = NULL, cp_global = NULL,
-                                 left_start = NULL, right_end = NULL,
-                                 min_seg = 3L,
-                                 verbose = FALSE) {
+                                block_sigma, n_perm = 100, scope = "local",
+                                Y_full = NULL, cp_global = NULL,
+                                left_start = NULL, right_end = NULL,
+                                min_seg = 3L,
+                                verbose = FALSE) {
   min_seg <- as.integer(min_seg[1])
   if (!is.finite(min_seg) || min_seg < 1L) min_seg <- 3L
   n_perm <- as.integer(n_perm[1])
   if (!is.finite(n_perm) || n_perm < 1L) n_perm <- 100L
   scope <- tolower(trimws(as.character(scope[1])))
   if (!(scope %in% c("local", "global"))) scope <- "local"
-
+  
   factorial_size <- function(n) {
     n <- as.integer(n[1])
     if (!is.finite(n) || n < 0L) return(NA_real_)
     if (n > 170L) return(Inf)
     exp(lgamma(n + 1))
   }
-
+  
   T_local <- dim(Y)[1]
   cp_local <- as.integer(cp[1])
   perm_space_size <- factorial_size(T_local)
-
+  
   if (scope == "global") {
     if (is.null(Y_full)) {
       if (verbose) message("    Global permutation requested but Y_full is NULL; falling back to local scope.")
@@ -560,11 +563,11 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
       cp_g <- as.integer(cp_global[1])
       l_start <- as.integer(left_start[1])
       r_end <- as.integer(right_end[1])
-
+      
       if (!is.finite(cp_g)) cp_g <- cp_local
       if (!is.finite(l_start)) l_start <- cp_g - cp_local + 1L
       if (!is.finite(r_end)) r_end <- l_start + T_local - 1L
-
+      
       l_start <- max(1L, l_start)
       r_end <- min(T_full, r_end)
       if (l_start > r_end || cp_g < l_start || cp_g >= r_end) {
@@ -577,7 +580,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
       }
     }
   }
-
+  
   if (!is.finite(cp_local) || cp_local < min_seg || T_local - cp_local < min_seg) {
     return(list(
       pvalue = NA_real_,
@@ -587,9 +590,9 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
       count_extreme = NA_integer_
     ))
   }
-
+  
   count_extreme <- 0L
-
+  
   for (b in seq_len(n_perm)) {
     if (scope == "global") {
       perm_idx <- sample(dim(Y_full)[1])
@@ -637,7 +640,7 @@ parrot <- function(Y, Q = NULL, Q2 = NULL,
 #' Parametric bootstrap for CP p-value
 #' @keywords internal  
 .bootstrap_pvalue <- function(Y, cp, observed_lr, null_fit, Q, Q2, type, 
-                               distribution, block_sigma, n_boot = 100, verbose = FALSE) {
+                              distribution, block_sigma, n_boot = 100, verbose = FALSE) {
   T_len <- dim(Y)[1]
   N1 <- dim(Y)[2]
   N2 <- dim(Y)[3]
