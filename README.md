@@ -30,13 +30,13 @@ library(PARROT)
 ```r
 library(PARROT)
 
-set.seed(1)
+set.seed(42)
 
-# Simulate a unipartite Bernoulli network with one change point
+# Simulate a unipartite Bernoulli network with one change point at t=25
 sim <- simulate_sbm_cp(
-  N = 24,
-  T_len = 40,
-  cp_time = 20,
+  N = 30,
+  T_len = 50,
+  cp_time = 25,
   Q = 2,
   type = "unipartite",
   distribution = "bernoulli",
@@ -49,6 +49,7 @@ fit <- parrot(
   Y = sim$Y,
   Q = 2,
   multiple = FALSE,
+  scan_method = "profile",
   compute_cis = FALSE,
   compute_pvalues = TRUE,
   pvalue_method = "permutation"
@@ -58,7 +59,7 @@ print(fit)
 
 # Inspect permutation p-value for the detected change point
 if (length(fit$pvalues) > 0) {
-  fit$pvalues[[1]][c("cp", "pvalue_method", "pvalue_raw", "pvalue_bonferroni")]
+  fit$pvalues[[1]][c("cp", "pvalue_method", "pvalue_raw", "pvalue_bh", "pvalue_bonferroni")]
 }
 
 plot(fit)

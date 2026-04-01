@@ -11,3 +11,4 @@ src/*.dylib
 # Windows user/session files
 *.Rhistory
 *.RData
+.Rproj.user
