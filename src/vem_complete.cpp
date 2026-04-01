@@ -63,26 +63,26 @@ List fit_vem_bipartite_weighted_cpp(
   List best_result;
   
   for (int init = 0; init < n_init; init++) {
-    // Initialize tau randomly
     NumericMatrix tau1(N1, Q1);
     NumericMatrix tau2(N2, Q2);
     
+    // Hard random assignment to break symmetry (critical for bipartite Gaussian)
+    double eps = 0.05 / std::max(1, Q1 - 1);
     for (int i = 0; i < N1; i++) {
-      double sum = 0;
+      int assigned = (int)(R::runif(0.0, 1.0) * Q1);
+      if (assigned >= Q1) assigned = Q1 - 1;
       for (int q = 0; q < Q1; q++) {
-        tau1(i, q) = R::runif(0.1, 1.0);
-        sum += tau1(i, q);
+        tau1(i, q) = (q == assigned) ? (1.0 - (Q1 - 1) * eps) : eps;
       }
-      for (int q = 0; q < Q1; q++) tau1(i, q) /= sum;
     }
     
+    eps = 0.05 / std::max(1, Q2 - 1);
     for (int j = 0; j < N2; j++) {
-      double sum = 0;
+      int assigned = (int)(R::runif(0.0, 1.0) * Q2);
+      if (assigned >= Q2) assigned = Q2 - 1;
       for (int l = 0; l < Q2; l++) {
-        tau2(j, l) = R::runif(0.1, 1.0);
-        sum += tau2(j, l);
+        tau2(j, l) = (l == assigned) ? (1.0 - (Q2 - 1) * eps) : eps;
       }
-      for (int l = 0; l < Q2; l++) tau2(j, l) /= sum;
     }
     
     // Initialize parameters
@@ -342,15 +342,14 @@ List fit_vem_unipartite_weighted_cpp(
   List best_result;
   
   for (int init = 0; init < n_init; init++) {
-    // Initialize tau randomly
     NumericMatrix tau(N, Q);
+    double eps = 0.05 / std::max(1, Q - 1);
     for (int i = 0; i < N; i++) {
-      double sum = 0;
+      int assigned = (int)(R::runif(0.0, 1.0) * Q);
+      if (assigned >= Q) assigned = Q - 1;
       for (int q = 0; q < Q; q++) {
-        tau(i, q) = R::runif(0.1, 1.0);
-        sum += tau(i, q);
+        tau(i, q) = (q == assigned) ? (1.0 - (Q - 1) * eps) : eps;
       }
-      for (int q = 0; q < Q; q++) tau(i, q) /= sum;
     }
     
     // Initialize parameters (symmetric)
@@ -562,22 +561,22 @@ List fit_vem_bipartite_binary_cpp(
     NumericMatrix tau1(N1, Q1);
     NumericMatrix tau2(N2, Q2);
     
+    double eps = 0.05 / std::max(1, Q1 - 1);
     for (int i = 0; i < N1; i++) {
-      double sum = 0;
+      int assigned = (int)(R::runif(0.0, 1.0) * Q1);
+      if (assigned >= Q1) assigned = Q1 - 1;
       for (int q = 0; q < Q1; q++) {
-        tau1(i, q) = R::runif(0.1, 1.0);
-        sum += tau1(i, q);
+        tau1(i, q) = (q == assigned) ? (1.0 - (Q1 - 1) * eps) : eps;
       }
-      for (int q = 0; q < Q1; q++) tau1(i, q) /= sum;
     }
     
+    eps = 0.05 / std::max(1, Q2 - 1);
     for (int j = 0; j < N2; j++) {
-      double sum = 0;
+      int assigned = (int)(R::runif(0.0, 1.0) * Q2);
+      if (assigned >= Q2) assigned = Q2 - 1;
       for (int l = 0; l < Q2; l++) {
-        tau2(j, l) = R::runif(0.1, 1.0);
-        sum += tau2(j, l);
+        tau2(j, l) = (l == assigned) ? (1.0 - (Q2 - 1) * eps) : eps;
       }
-      for (int l = 0; l < Q2; l++) tau2(j, l) /= sum;
     }
     
     NumericMatrix prob(Q1, Q2);
@@ -776,13 +775,13 @@ List fit_vem_unipartite_binary_cpp(
   
   for (int init = 0; init < n_init; init++) {
     NumericMatrix tau(N, Q);
+    double eps = 0.05 / std::max(1, Q - 1);
     for (int i = 0; i < N; i++) {
-      double sum = 0;
+      int assigned = (int)(R::runif(0.0, 1.0) * Q);
+      if (assigned >= Q) assigned = Q - 1;
       for (int q = 0; q < Q; q++) {
-        tau(i, q) = R::runif(0.1, 1.0);
-        sum += tau(i, q);
+        tau(i, q) = (q == assigned) ? (1.0 - (Q - 1) * eps) : eps;
       }
-      for (int q = 0; q < Q; q++) tau(i, q) /= sum;
     }
     
     NumericMatrix prob(Q, Q);

@@ -203,17 +203,19 @@ fit_sbm_segment <- function(Y, start_time, end_time,
   for (init in 1:n_init) {
     if (verbose) message("Initialization ", init, "/", n_init)
     
-    # Initialize tau randomly
+    # Hard random assignment to break symmetry (prevents saddle-point traps)
+    make_hard_tau <- function(n, q) {
+      tau <- matrix(0.05 / max(1, q - 1), n, q)
+      assigned <- sample.int(q, n, replace = TRUE)
+      for (i in seq_len(n)) tau[i, assigned[i]] <- 1.0 - (q - 1) * 0.05 / max(1, q - 1)
+      tau
+    }
     if (type == "unipartite") {
-      tau <- matrix(runif(N1 * Q1), N1, Q1)
-      tau <- tau / rowSums(tau)
-      tau1 <- tau
-      tau2 <- tau
+      tau1 <- make_hard_tau(N1, Q1)
+      tau2 <- tau1
     } else {
-      tau1 <- matrix(runif(N1 * Q1), N1, Q1)
-      tau1 <- tau1 / rowSums(tau1)
-      tau2 <- matrix(runif(N2 * Q2), N2, Q2)
-      tau2 <- tau2 / rowSums(tau2)
+      tau1 <- make_hard_tau(N1, Q1)
+      tau2 <- make_hard_tau(N2, Q2)
     }
     
     # Initialize parameters
@@ -232,6 +234,7 @@ fit_sbm_segment <- function(Y, start_time, end_time,
     
     elbo_prev <- -Inf
     converged <- FALSE
+    elbo_trace <- numeric(0)
     
     for (iter in 1:max_iter) {
       # E-step: Update tau using vectorized operations
@@ -284,11 +287,14 @@ fit_sbm_segment <- function(Y, start_time, end_time,
         elbo <- .compute_elbo_bin_vec(Y, tau1, tau2, prob, pi1, pi2, type)
       }
       
+      elbo_trace <- c(elbo_trace, elbo)
+      
       if (verbose && iter %% 10 == 0) {
         message("  Iter ", iter, ": ELBO = ", round(elbo, 4))
       }
       
-      if (abs(elbo - elbo_prev) < tol) {
+      rel_change <- abs(elbo - elbo_prev) / max(1, abs(elbo))
+      if (rel_change < tol) {
         converged <- TRUE
         break
       }
@@ -313,6 +319,7 @@ fit_sbm_segment <- function(Y, start_time, end_time,
         elbo = elbo,
         converged = converged,
         iterations = iter,
+        elbo_trace = elbo_trace,
         pi1 = pi1,
         pi2 = pi2
       )
@@ -869,38 +876,41 @@ fit_sbm_segment <- function(Y, start_time, end_time,
   T_len <- fit$T_len
   Q1 <- fit$Q1
   Q2 <- fit$Q2
-  
-  # Number of observations
-  if (type == "unipartite") {
-    n_obs <- T_len * N1 * (N1 - 1) / 2
-  } else {
-    n_obs <- T_len * N1 * N2
+
+  # Guard against malformed inputs from failed fits.
+  if (!is.finite(fit$elbo) || !is.finite(N1) || !is.finite(N2) ||
+      !is.finite(T_len) || !is.finite(Q1) || !is.finite(Q2)) {
+    return(NA_real_)
   }
-  
-  # Number of parameters
+
+  N1 <- max(2L, as.integer(N1))
+  N2 <- max(2L, as.integer(N2))
+  T_len <- max(1L, as.integer(T_len))
+  Q1 <- max(1L, as.integer(Q1))
+  Q2 <- max(1L, as.integer(Q2))
+
   if (type == "unipartite") {
-    n_mu <- Q1 * (Q1 + 1) / 2
-    n_cluster <- Q1 - 1
+    n_block <- Q1 * (Q1 + 1) / 2
+    n_mix <- Q1 - 1
+    mix_scale <- log(max(2, N1))
+    block_scale <- log(max(2, N1 * (N1 - 1) / 2 * T_len))
   } else {
-    n_mu <- Q1 * Q2
-    n_cluster <- (Q1 - 1) + (Q2 - 1)
+    n_block <- Q1 * Q2
+    n_mix <- (Q1 - 1) + (Q2 - 1)
+    mix_scale <- log(max(2, max(N1, N2)))
+    block_scale <- log(max(2, N1 * N2 * T_len))
   }
-  
+
   if (distribution == "gaussian") {
-    if (fit$block_sigma) {
-      n_sigma <- if (type == "unipartite") Q1 * (Q1 + 1) / 2 else Q1 * Q2
-    } else {
-      n_sigma <- 1
-    }
-    n_params <- n_mu + n_sigma + n_cluster
+    n_sigma <- if (isTRUE(fit$block_sigma)) n_block else 1L
   } else {
-    n_params <- n_mu + n_cluster
+    n_sigma <- 0L
   }
-  
-  # ICL = ELBO - 0.5 * n_params * log(n_obs)
-  icl <- fit$elbo - 0.5 * n_params * log(n_obs)
-  
-  return(icl)
+
+  penalty <- 0.5 * n_mix * mix_scale +
+    0.5 * (n_block + n_sigma) * block_scale
+
+  as.numeric(fit$elbo) - penalty
 }
 
 # =============================================================================

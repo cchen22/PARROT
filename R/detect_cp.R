@@ -283,7 +283,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
                                type = c("unipartite", "bipartite"),
                                distribution = c("gaussian", "bernoulli"),
                                method = c("wbs", "bs", "pelt"),
-                               scan_method = c("profile", "score"),
+                               scan_method = c("score", "profile"),
                                block_sigma = FALSE,
                                use_cpp = TRUE,
                                min_segment = 5,
@@ -372,6 +372,17 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     }
   }
   
+  score_gain_by_cp <- attr(candidates, "score_gain_by_cp", exact = TRUE)
+  score_gain_curve <- attr(candidates, "score_gain_curve", exact = TRUE)
+  score_gain_table <- .as_score_gain_table(score_gain_by_cp)
+
+  # Compute profile LL across all valid positions
+  profile_ll <- .compute_multi_cp_profile(
+    Y, score_prep, scan_method, T_len, min_segment,
+    Q, Q2, type, distribution, block_sigma,
+    use_cpp, max_iter, tol, n_init, verbose
+  )
+
   if (length(candidates) == 0) {
     if (verbose) message("No change points detected")
     
@@ -393,7 +404,11 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
       N2 = N2,
       Q = Q,
       Q2 = Q2,
-      global_fit = global_fit
+      global_fit = global_fit,
+      profile_ll = profile_ll,
+      score_gain_by_cp = score_gain_by_cp,
+      score_gain_curve = score_gain_curve,
+      score_gain_table = score_gain_table
     )
     class(result) <- c("multi_cp_detection", "list")
     return(result)
@@ -425,7 +440,11 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     Q = Q,
     Q2 = Q2,
     block_sigma = block_sigma,
-    global_fit = global_fit
+    global_fit = global_fit,
+    profile_ll = profile_ll,
+    score_gain_by_cp = score_gain_by_cp,
+    score_gain_curve = score_gain_curve,
+    score_gain_table = score_gain_table
   )
   
   class(result) <- c("multi_cp_detection", "list")
@@ -436,6 +455,49 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
+#' Compute profile LL for multi-CP detection
+#'
+#' In score mode, reuses the precomputed cumulative sufficient statistics
+#' (zero extra SBM fits). In profile mode, performs O(T) SBM refits.
+#' @keywords internal
+.compute_multi_cp_profile <- function(Y, score_prep, scan_method, T_len,
+                                      min_segment, Q, Q2, type, distribution,
+                                      block_sigma, use_cpp, max_iter, tol,
+                                      n_init, verbose) {
+  profile_ll <- rep(-Inf, T_len)
+
+  if (scan_method == "score" && !is.null(score_prep)) {
+    profile_ll <- .score_profile_interval(score_prep, 1L, T_len, min_segment)
+  } else {
+    scan_range <- seq.int(min_segment, T_len - min_segment)
+    if (length(scan_range) == 0L) return(profile_ll)
+    for (t in scan_range) {
+      fit_l <- tryCatch(
+        fit_sbm(Y[1:t, , , drop = FALSE], Q, Q2, type, distribution,
+                block_sigma, use_cpp, max_iter %/% 2L, tol * 10, max(1L, n_init %/% 2L), FALSE),
+        error = function(e) list(elbo = -Inf)
+      )
+      fit_r <- tryCatch(
+        fit_sbm(Y[(t + 1L):T_len, , , drop = FALSE], Q, Q2, type, distribution,
+                block_sigma, use_cpp, max_iter %/% 2L, tol * 10, max(1L, n_init %/% 2L), FALSE),
+        error = function(e) list(elbo = -Inf)
+      )
+      ll <- fit_l$elbo + fit_r$elbo
+      if (is.finite(ll)) profile_ll[t] <- ll
+    }
+  }
+
+  if (verbose) {
+    valid <- which(is.finite(profile_ll) & profile_ll > -Inf)
+    if (length(valid) > 0) {
+      best <- valid[which.max(profile_ll[valid])]
+      message(sprintf("Profile LL: best position t=%d (LL=%.2f)", best, profile_ll[best]))
+    }
+  }
+
+  profile_ll
+}
 
 #' Compute degrees of freedom for LRT
 #' @keywords internal
@@ -666,12 +728,40 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   list(cp = best_cp, gain = gain, best_ll = best_ll, null_ll = null_ll)
 }
 
+#' Build score gain table from named vector
+#' @keywords internal
+.as_score_gain_table <- function(score_gain_by_cp) {
+  if (is.null(score_gain_by_cp) || length(score_gain_by_cp) == 0L) {
+    return(data.frame(cp = integer(0), gain = numeric(0), stringsAsFactors = FALSE))
+  }
+  cp_names <- suppressWarnings(as.integer(names(score_gain_by_cp)))
+  cp_vals <- as.integer(cp_names)
+  gain_vals <- as.numeric(score_gain_by_cp)
+  keep <- is.finite(cp_vals) & is.finite(gain_vals)
+  cp_vals <- cp_vals[keep]
+  gain_vals <- gain_vals[keep]
+  if (length(cp_vals) == 0L) {
+    return(data.frame(cp = integer(0), gain = numeric(0), stringsAsFactors = FALSE))
+  }
+  ord <- order(gain_vals, decreasing = TRUE)
+  data.frame(
+    cp = as.integer(cp_vals[ord]),
+    gain = as.numeric(gain_vals[ord]),
+    stringsAsFactors = FALSE
+  )
+}
+
 #' WBS candidates using score scan
 #' @keywords internal
 .wbs_candidates_score <- function(prep, min_segment, n_intervals, verbose) {
   T_len <- prep$T_len
   min_interval <- 2L * as.integer(min_segment) + 1L
-  if (T_len < min_interval) return(integer(0))
+  if (T_len < min_interval) {
+    out <- integer(0)
+    attr(out, "score_gain_by_cp") <- numeric(0)
+    attr(out, "score_gain_curve") <- rep(NA_real_, T_len)
+    return(out)
+  }
   
   safe_sample <- function(x, n = 1L) {
     if (length(x) == 1L) x else sample(x, n)
@@ -693,14 +783,25 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     }
   }
   
-  if (length(candidates) == 0) return(integer(0))
+  if (length(candidates) == 0) {
+    out <- integer(0)
+    attr(out, "score_gain_by_cp") <- numeric(0)
+    attr(out, "score_gain_curve") <- rep(NA_real_, T_len)
+    return(out)
+  }
   
   cps <- vapply(candidates, `[[`, integer(1), "cp")
   gains <- vapply(candidates, `[[`, numeric(1), "gain")
   unique_cps <- unique(cps)
   max_gains <- vapply(unique_cps, function(cp) max(gains[cps == cp]), numeric(1))
   ord <- order(max_gains, decreasing = TRUE)
-  unique_cps[ord]
+  out <- unique_cps[ord]
+  gain_by_cp <- stats::setNames(as.numeric(max_gains[ord]), as.character(out))
+  gain_curve <- rep(NA_real_, T_len)
+  gain_curve[out] <- as.numeric(max_gains[ord])
+  attr(out, "score_gain_by_cp") <- gain_by_cp
+  attr(out, "score_gain_curve") <- gain_curve
+  out
 }
 
 #' BS candidates using score scan
@@ -708,6 +809,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 .bs_candidates_score <- function(prep, min_segment, verbose) {
   T_len <- prep$T_len
   candidates <- integer(0)
+  gains <- numeric(0)
   
   .bs_recursive_score <- function(start, end) {
     len <- end - start + 1L
@@ -717,6 +819,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     if (is.finite(best$cp) && best$gain > 0) {
       cp <- as.integer(best$cp)
       candidates <<- c(candidates, cp)
+      gains <<- c(gains, as.numeric(best$gain))
       .bs_recursive_score(start, cp)
       .bs_recursive_score(cp + 1L, end)
     }
@@ -725,6 +828,18 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   
   .bs_recursive_score(1L, T_len)
   if (verbose) message(sprintf("  BS score candidates found: %d", length(candidates)))
+  if (length(candidates) == 0L) {
+    attr(candidates, "score_gain_by_cp") <- numeric(0)
+    attr(candidates, "score_gain_curve") <- rep(NA_real_, T_len)
+    return(candidates)
+  }
+  unique_cps <- unique(candidates)
+  max_gains <- vapply(unique_cps, function(cp) max(gains[candidates == cp]), numeric(1))
+  gain_by_cp <- stats::setNames(as.numeric(max_gains), as.character(unique_cps))
+  gain_curve <- rep(NA_real_, T_len)
+  gain_curve[unique_cps] <- as.numeric(max_gains)
+  attr(candidates, "score_gain_by_cp") <- gain_by_cp
+  attr(candidates, "score_gain_curve") <- gain_curve
   candidates
 }
 
