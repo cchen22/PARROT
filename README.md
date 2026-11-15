@@ -111,4 +111,18 @@ asymptotic approximation.
 If you use PARROT in your research, please cite the corresponding manuscript
 and repository:
 
+- Chen C, Padi M, Quackenbush J. PARROT: Phase-Altering Regulatory Rewiring Over
+  Time. bioRxiv 2026.06.24.734262 (2026).
+  doi: [10.64898/2026.06.24.734262](https://doi.org/10.64898/2026.06.24.734262)
 - Repository: https://github.com/cchen22/PARROT
+
+```bibtex
+@article{chen2026parrot,
+  title   = {{PARROT}: Phase-Altering Regulatory Rewiring Over Time},
+  author  = {Chen, Chen and Padi, Megha and Quackenbush, John},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.06.24.734262},
+  note    = {Preprint 2026.06.24.734262}
+}
+```
