@@ -22,6 +22,7 @@
 #' @param tol Convergence tolerance
 #' @param n_init Number of random initializations
 #' @param verbose Print progress
+#' @param fit_seed Seed of the segment fits (default 1); every SBM fit of a segment uses its own seed derived from the segment's time points and \code{fit_seed} (see \code{\link{parrot}}).
 #' @return Object of class "cp_detection" with results
 #' @export
 #' @examples
@@ -31,7 +32,7 @@
 #'                         type = "unipartite", distribution = "bernoulli",
 #'                         theta1 = list(prob = matrix(c(0.8, 0.2, 0.2, 0.8), 2, 2)),
 #'                         theta2 = list(prob = matrix(c(0.2, 0.8, 0.8, 0.2), 2, 2)))
-#' result <- detect_single_cp(data$Y, Q = 2, type = "unipartite", 
+#' result <- detect_single_cp(data$Y, Q = 2, type = "unipartite",
 #'                           distribution = "bernoulli")
 #' print(result$cp_est)
 #' }
@@ -46,28 +47,29 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
                              max_iter = 100,
                              tol = 1e-6,
                              n_init = 5,
-                             verbose = FALSE) {
-  
+                             verbose = FALSE,
+                             fit_seed = 1L) {
+
   type <- match.arg(type)
   distribution <- match.arg(distribution)
   scan_method <- match.arg(scan_method)
-  
+
   dims <- dim(Y)
   T_len <- dims[1]
   N1 <- dims[2]
   N2 <- dims[3]
-  
+
   if (type == "unipartite") {
     stopifnot(N1 == N2)
     Q2 <- Q
   } else {
     if (is.null(Q2)) Q2 <- Q
   }
-  
+
   # Scan range
   scan_start <- min_segment
   scan_end <- T_len - min_segment
-  
+
   if (scan_end <= scan_start) {
     warning("Time series too short for change point detection")
     return(.create_cp_result(
@@ -76,29 +78,39 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
       T_len = T_len, N1 = N1, N2 = N2, Q = Q, Q2 = Q2
     ))
   }
-  
+
   if (verbose) message("Fitting null model (no change point)...")
-  
-  # Fit null model
-  null_fit <- fit_sbm(Y, Q, Q2, type, distribution, block_sigma, use_cpp,
-                      max_iter, tol, n_init * 2, FALSE)
-  
+
+  # Every segment fit has its own seed derived from its time points and fit_seed
+  # (PARROT >= 1.1.0): the result does not depend on the global random state, and
+  # the profile scan, the Wilks statistic and the permutation test use the same fits.
+  elbo_fun <- if (scan_method == "profile") {
+    .segment_elbo_cache(Y, Q, Q2, type, distribution, block_sigma, use_cpp,
+                        max_iter, tol, n_init, seed = fit_seed)
+  } else NULL
+  fit_seg <- function(idx, ni = n_init) .fit_segment_full(Y, idx, Q, Q2, type, distribution,
+                                                          block_sigma, use_cpp, max_iter, tol,
+                                                          ni, fit_seed)
+
+  # Fit null model (profile scan: the same fit as the cached whole-series ELBO)
+  null_fit <- if (scan_method == "profile") fit_seg(seq_len(T_len)) else fit_seg(seq_len(T_len), n_init * 2)
+
   # Scan candidate split points
   profile_ll <- rep(-Inf, T_len)
   best_cp <- NA_integer_
   best_scan_ll <- -Inf
   best_fits <- list(left = NULL, right = NULL)
-  
+
   if (verbose) {
     message(sprintf("Scanning t = %d to %d using %s scan...", scan_start, scan_end, scan_method))
   }
-  
+
   if (scan_method == "score") {
     prep <- tryCatch(
       .prepare_score_scan(Y, null_fit, type, distribution, block_sigma),
       error = function(e) NULL
     )
-    
+
     if (!is.null(prep)) {
       profile_ll <- .score_profile_interval(prep, start = 1L, end = T_len, min_segment = min_segment)
       idx <- which(is.finite(profile_ll))
@@ -107,45 +119,33 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
         best_scan_ll <- as.numeric(profile_ll[best_cp])
       }
     }
-    
+
     if (!is.finite(best_scan_ll) || !is.finite(best_cp)) {
       warning("Score scan failed; falling back to profile scan refits.")
       scan_method <- "profile"
     }
   }
-  
+
   if (scan_method == "profile") {
+    if (is.null(elbo_fun)) {
+      elbo_fun <- .segment_elbo_cache(Y, Q, Q2, type, distribution, block_sigma, use_cpp,
+                                      max_iter, tol, n_init, seed = fit_seed)
+    }
     for (t in scan_start:scan_end) {
-      Y_left <- Y[1:t, , , drop = FALSE]
-      Y_right <- Y[(t + 1):T_len, , , drop = FALSE]
-      
-      fit_l <- tryCatch(
-        fit_sbm(Y_left, Q, Q2, type, distribution, block_sigma, use_cpp,
-                max_iter, tol, n_init, FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      fit_r <- tryCatch(
-        fit_sbm(Y_right, Q, Q2, type, distribution, block_sigma, use_cpp,
-                max_iter, tol, n_init, FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      
-      ll <- fit_l$elbo + fit_r$elbo
+      ll <- elbo_fun(1:t) + elbo_fun((t + 1):T_len)
       profile_ll[t] <- ll
-      
+
       if (ll > best_scan_ll) {
         best_scan_ll <- ll
         best_cp <- as.integer(t)
-        best_fits$left <- fit_l
-        best_fits$right <- fit_r
       }
-      
+
       if (verbose && t %% 10 == 0) {
         message(sprintf("  t = %d: LL = %.2f (best = %d)", t, ll, best_cp))
       }
     }
   }
-  
+
   if (!is.finite(best_cp)) {
     warning("No valid candidate split found.")
     return(.create_cp_result(
@@ -154,40 +154,30 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
       T_len = T_len, N1 = N1, N2 = N2, Q = Q, Q2 = Q2
     ))
   }
-  
+
   if (is.null(best_fits$left) || is.null(best_fits$right)) {
-    Y_left <- Y[1:best_cp, , , drop = FALSE]
-    Y_right <- Y[(best_cp + 1):T_len, , , drop = FALSE]
-    
-    best_fits$left <- tryCatch(
-      fit_sbm(Y_left, Q, Q2, type, distribution, block_sigma, use_cpp,
-              max_iter, tol, n_init, FALSE),
-      error = function(e) list(elbo = -Inf)
-    )
-    best_fits$right <- tryCatch(
-      fit_sbm(Y_right, Q, Q2, type, distribution, block_sigma, use_cpp,
-              max_iter, tol, n_init, FALSE),
-      error = function(e) list(elbo = -Inf)
-    )
+    # same seeds as the cached segment ELBOs, hence the same fits
+    best_fits$left <- fit_seg(1:best_cp)
+    best_fits$right <- fit_seg((best_cp + 1):T_len)
   }
-  
+
   alt_ll <- as.numeric(best_fits$left$elbo + best_fits$right$elbo)
-  
+
   # Compute test statistic and significance
   lr_stat <- 2 * (alt_ll - null_fit$elbo)
   lr_stat <- max(0, lr_stat)
-  
+
   # Degrees of freedom for LRT
   df <- .compute_df(Q, Q2, type, distribution, block_sigma)
   pvalue <- pchisq(lr_stat, df = df, lower.tail = FALSE)
   significant <- pvalue < alpha
-  
+
   # Confidence interval based on likelihood ratio
   cutoff <- best_scan_ll - 0.5 * qchisq(1 - alpha, df = 1)
   ci_set <- which(profile_ll >= cutoff)
   ci_lower <- if (length(ci_set) > 0) min(ci_set) else NA
   ci_upper <- if (length(ci_set) > 0) max(ci_set) else NA
-  
+
   # Create result object
   result <- list(
     cp_est = if (significant) best_cp else NA,
@@ -201,6 +191,8 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
     ci_set = ci_set,
     profile_ll = profile_ll,
     scan_method = scan_method,
+    elbo_fun = elbo_fun,
+    fit_seed = fit_seed,
     null_elbo = null_fit$elbo,
     alt_elbo = alt_ll,
     null_fit = null_fit,
@@ -217,9 +209,9 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
     min_segment = min_segment,
     alpha = alpha
   )
-  
+
   class(result) <- c("cp_detection", "list")
-  
+
   if (verbose) {
     if (significant) {
       message(sprintf("\nChange point detected at t = %d (p = %.4f)", best_cp, pvalue))
@@ -228,7 +220,7 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
       message(sprintf("\nNo significant change point (p = %.4f)", pvalue))
     }
   }
-  
+
   return(result)
 }
 
@@ -256,6 +248,7 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
 #' @param n_init Number of random initializations
 #' @param n_intervals Number of random intervals for WBS
 #' @param verbose Print progress
+#' @param fit_seed Seed of the segment fits (default 1); every SBM fit of a segment uses its own seed derived from the segment's time points and \code{fit_seed} (see \code{\link{parrot}}).
 #' @return Object of class "multi_cp_detection" with results
 #' @export
 #' @examples
@@ -264,16 +257,16 @@ detect_single_cp <- function(Y, Q, Q2 = NULL,
 #' theta1 <- list(prob = matrix(c(0.8, 0.2, 0.2, 0.8), 2, 2))
 #' theta2 <- list(prob = matrix(c(0.5, 0.5, 0.5, 0.5), 2, 2))
 #' theta3 <- list(prob = matrix(c(0.2, 0.8, 0.8, 0.2), 2, 2))
-#' 
+#'
 #' data <- simulate_sbm_multi_cp(N = 30, T_len = 90, cp_times = c(30, 60),
 #'                               Q = 2, type = "unipartite",
 #'                               distribution = "bernoulli",
 #'                               theta_list = list(theta1, theta2, theta3))
-#' 
+#'
 #' # Default: WBS
 #' result <- detect_multiple_cp(data$Y, Q = 2, type = "unipartite",
 #'                              distribution = "bernoulli", method = "wbs")
-#' 
+#'
 #' # PELT for optimal segmentation
 #' result <- detect_multiple_cp(data$Y, Q = 2, type = "unipartite",
 #'                              distribution = "bernoulli", method = "pelt")
@@ -283,44 +276,45 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
                                type = c("unipartite", "bipartite"),
                                distribution = c("gaussian", "bernoulli"),
                                method = c("wbs", "bs", "pelt"),
-                               scan_method = c("score", "profile"),
+                               scan_method = c("profile", "score"),
                                block_sigma = FALSE,
                                use_cpp = TRUE,
                                min_segment = 5,
-                               max_cps = 10,
+                               max_cps = 3,
                                alpha = 0.05,
                                penalty = "BIC",
                                max_iter = 100,
                                tol = 1e-6,
                                n_init = 5,
-                               n_intervals = 100,
-                               verbose = FALSE) {
-  
+                               n_intervals = 50,
+                               verbose = FALSE,
+                               fit_seed = 1L) {
+
   type <- match.arg(type)
   distribution <- match.arg(distribution)
   method <- match.arg(method)
   scan_method <- match.arg(scan_method)
-  
+
   dims <- dim(Y)
   T_len <- dims[1]
   N1 <- dims[2]
   N2 <- dims[3]
-  
+
   if (type == "unipartite") {
     stopifnot(N1 == N2)
     Q2 <- Q
   } else {
     if (is.null(Q2)) Q2 <- Q
   }
-  
+
   if (verbose) {
     message(sprintf("Detecting multiple CPs using %s (scan=%s)...",
                     toupper(method), scan_method))
   }
-  
+
   global_fit <- NULL
   score_prep <- NULL
-  
+
   # PELT uses different algorithm path
 
   if (method == "pelt") {
@@ -334,7 +328,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     pelt_result$min_segment <- min_segment
     return(pelt_result)
   }
-  
+
   if (scan_method == "score") {
     global_fit <- tryCatch(
       fit_sbm(Y, Q, Q2, type, distribution, block_sigma, use_cpp,
@@ -352,7 +346,14 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
       scan_method <- "profile"
     }
   }
-  
+
+  # One memoised segment-ELBO function (profile path) shared by the candidate search,
+  # the profile curve and the p-values of parrot()
+  elbo_fun <- if (scan_method == "profile") {
+    .segment_elbo_cache(Y, Q, Q2, type, distribution, block_sigma, use_cpp, max_iter, tol, n_init,
+                        seed = fit_seed)
+  } else NULL
+
   # Find candidate change points (WBS or BS)
   if (scan_method == "score") {
     if (method == "wbs") {
@@ -364,14 +365,14 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     if (method == "wbs") {
       candidates <- .wbs_candidates(Y, Q, Q2, type, distribution, block_sigma,
                                     use_cpp, min_segment, max_iter, tol, n_init,
-                                    n_intervals, verbose)
+                                    n_intervals, verbose, elbo_fun = elbo_fun)
     } else {
       candidates <- .bs_candidates(Y, Q, Q2, type, distribution, block_sigma,
                                    use_cpp, min_segment, max_iter, tol, n_init,
-                                   verbose)
+                                   verbose, elbo_fun = elbo_fun)
     }
   }
-  
+
   score_gain_by_cp <- attr(candidates, "score_gain_by_cp", exact = TRUE)
   score_gain_curve <- attr(candidates, "score_gain_curve", exact = TRUE)
   score_gain_table <- .as_score_gain_table(score_gain_by_cp)
@@ -380,15 +381,15 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   profile_ll <- .compute_multi_cp_profile(
     Y, score_prep, scan_method, T_len, min_segment,
     Q, Q2, type, distribution, block_sigma,
-    use_cpp, max_iter, tol, n_init, verbose
+    use_cpp, max_iter, tol, n_init, verbose, elbo_fun = elbo_fun
   )
 
   if (length(candidates) == 0) {
     if (verbose) message("No change points detected")
-    
+
     null_fit <- fit_sbm(Y, Q, Q2, type, distribution, block_sigma, use_cpp,
                         max_iter, tol, n_init, FALSE)
-    
+
     result <- list(
       cps = integer(0),
       n_cps = 0,
@@ -413,17 +414,17 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     class(result) <- c("multi_cp_detection", "list")
     return(result)
   }
-  
+
   # Filter candidates to be well-separated
   final_cps <- .filter_cps(candidates, min_segment, max_cps)
-  
-  if (verbose) message(sprintf("Detected %d change point(s): %s", 
+
+  if (verbose) message(sprintf("Detected %d change point(s): %s",
                                length(final_cps), paste(final_cps, collapse = ", ")))
-  
+
   # Fit segments
   segments <- .fit_final_segments(Y, final_cps, Q, Q2, type, distribution,
                                    block_sigma, use_cpp, max_iter, tol, n_init)
-  
+
   result <- list(
     cps = sort(final_cps),
     n_cps = length(final_cps),
@@ -444,11 +445,12 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     profile_ll = profile_ll,
     score_gain_by_cp = score_gain_by_cp,
     score_gain_curve = score_gain_curve,
-    score_gain_table = score_gain_table
+    score_gain_table = score_gain_table,
+    elbo_fun = elbo_fun
   )
-  
+
   class(result) <- c("multi_cp_detection", "list")
-  
+
   return(result)
 }
 
@@ -464,7 +466,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 .compute_multi_cp_profile <- function(Y, score_prep, scan_method, T_len,
                                       min_segment, Q, Q2, type, distribution,
                                       block_sigma, use_cpp, max_iter, tol,
-                                      n_init, verbose) {
+                                      n_init, verbose, elbo_fun = NULL) {
   profile_ll <- rep(-Inf, T_len)
 
   if (scan_method == "score" && !is.null(score_prep)) {
@@ -472,18 +474,11 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   } else {
     scan_range <- seq.int(min_segment, T_len - min_segment)
     if (length(scan_range) == 0L) return(profile_ll)
+    E <- if (is.null(elbo_fun)) {
+      .segment_elbo_cache(Y, Q, Q2, type, distribution, block_sigma, use_cpp, max_iter, tol, n_init)
+    } else elbo_fun
     for (t in scan_range) {
-      fit_l <- tryCatch(
-        fit_sbm(Y[1:t, , , drop = FALSE], Q, Q2, type, distribution,
-                block_sigma, use_cpp, max_iter %/% 2L, tol * 10, max(1L, n_init %/% 2L), FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      fit_r <- tryCatch(
-        fit_sbm(Y[(t + 1L):T_len, , , drop = FALSE], Q, Q2, type, distribution,
-                block_sigma, use_cpp, max_iter %/% 2L, tol * 10, max(1L, n_init %/% 2L), FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      ll <- fit_l$elbo + fit_r$elbo
+      ll <- E(1:t) + E((t + 1L):T_len)
       if (is.finite(ll)) profile_ll[t] <- ll
     }
   }
@@ -507,7 +502,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   } else {
     n_mu <- Q * Q2
   }
-  
+
   if (distribution == "gaussian") {
     if (block_sigma) {
       n_sigma <- n_mu
@@ -562,19 +557,19 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   T_len <- dims[1]
   N1 <- dims[2]
   N2 <- dims[3]
-  
+
   tau_obj <- .extract_score_tau(fit, type)
   tau1 <- as.matrix(tau_obj$tau1)
   tau2 <- as.matrix(tau_obj$tau2)
-  
+
   if (nrow(tau1) != N1 || nrow(tau2) != N2) {
     stop("Score-scan memberships have incompatible dimensions.")
   }
-  
+
   Q1 <- ncol(tau1)
   Q2 <- ncol(tau2)
   B <- Q1 * Q2
-  
+
   if (type == "unipartite") {
     ones <- matrix(1, nrow = N1, ncol = N2)
     cross <- t(tau1) %*% ones %*% tau2
@@ -587,17 +582,17 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   n_block <- as.numeric(n_block_mat)
   n_block[!is.finite(n_block)] <- 0
   n_block <- pmax(n_block, 1e-12)
-  
+
   sum1 <- matrix(0, nrow = T_len, ncol = B)
   sum2 <- if (distribution == "gaussian") matrix(0, nrow = T_len, ncol = B) else NULL
-  
+
   for (tt in seq_len(T_len)) {
     Y_t <- Y[tt, , , drop = TRUE]
     if (!is.matrix(Y_t)) {
       Y_t <- matrix(Y_t, nrow = N1, ncol = N2)
     }
     Y_t[!is.finite(Y_t)] <- 0
-    
+
     if (type == "unipartite") {
       diag(Y_t) <- 0
       S1 <- 0.5 * (t(tau1) %*% Y_t %*% tau2)
@@ -610,21 +605,21 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
         S2 <- t(tau1) %*% (Y_t * Y_t) %*% tau2
       }
     }
-    
+
     sum1[tt, ] <- as.numeric(S1)
     if (distribution == "gaussian") sum2[tt, ] <- as.numeric(S2)
   }
-  
+
   cum_sum1 <- rbind(rep(0, B), apply(sum1, 2, cumsum))
   if (B == 1L) cum_sum1 <- matrix(cum_sum1, ncol = 1)
-  
+
   if (distribution == "gaussian") {
     cum_sum2 <- rbind(rep(0, B), apply(sum2, 2, cumsum))
     if (B == 1L) cum_sum2 <- matrix(cum_sum2, ncol = 1)
   } else {
     cum_sum2 <- matrix(0, nrow = T_len + 1L, ncol = B)
   }
-  
+
   list(
     T_len = T_len,
     Q1 = Q1,
@@ -656,22 +651,22 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 #' @keywords internal
 .score_segment_ll <- function(sum1, sum2, len, n_block, distribution, block_sigma) {
   if (!is.finite(len) || len <= 0) return(-Inf)
-  
+
   N <- pmax(len * as.numeric(n_block), 1e-12)
   S1 <- as.numeric(sum1)
-  
+
   if (distribution == "bernoulli") {
     S1 <- pmin(pmax(S1, 0), N)
     p_hat <- pmin(pmax(S1 / N, 1e-8), 1 - 1e-8)
     ll <- sum(S1 * log(p_hat) + (N - S1) * log(1 - p_hat))
     return(as.numeric(ll))
   }
-  
+
   S2 <- as.numeric(sum2)
   mu_hat <- S1 / N
   sse <- S2 - (S1 * S1) / N
   sse <- pmax(sse, 1e-8)
-  
+
   if (block_sigma) {
     sigma2 <- pmax(sse / N, 1e-8)
     ll <- sum(-0.5 * N * (log(2 * pi * sigma2) + 1))
@@ -688,13 +683,13 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 #' @keywords internal
 .score_profile_interval <- function(prep, start, end, min_segment) {
   profile_ll <- rep(-Inf, prep$T_len)
-  
+
   scan_start <- as.integer(start + min_segment - 1L)
   scan_end <- as.integer(end - min_segment)
   if (!is.finite(scan_start) || !is.finite(scan_end) || scan_end < scan_start) {
     return(profile_ll)
   }
-  
+
   for (cp in scan_start:scan_end) {
     left <- .score_segment_stats(prep, start, cp)
     right <- .score_segment_stats(prep, cp + 1L, end)
@@ -704,7 +699,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
                                   prep$n_block, prep$distribution, prep$block_sigma)
     profile_ll[cp] <- ll_left + ll_right
   }
-  
+
   profile_ll
 }
 
@@ -716,7 +711,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   if (length(idx) == 0) {
     return(list(cp = NA_integer_, gain = 0, best_ll = -Inf, null_ll = -Inf))
   }
-  
+
   seg <- .score_segment_stats(prep, start, end)
   null_ll <- .score_segment_ll(seg$sum1, seg$sum2, seg$len,
                                prep$n_block, prep$distribution, prep$block_sigma)
@@ -724,7 +719,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   best_ll <- as.numeric(profile_ll[best_cp])
   gain <- best_ll - null_ll
   if (!is.finite(gain)) gain <- 0
-  
+
   list(cp = best_cp, gain = gain, best_ll = best_ll, null_ll = null_ll)
 }
 
@@ -762,34 +757,34 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     attr(out, "score_gain_curve") <- rep(NA_real_, T_len)
     return(out)
   }
-  
+
   safe_sample <- function(x, n = 1L) {
     if (length(x) == 1L) x else sample(x, n)
   }
-  
+
   candidates <- list()
   for (m in seq_len(n_intervals)) {
     s <- safe_sample(seq_len(T_len - min_interval + 1L), 1L)
     e <- safe_sample(seq.int(s + min_interval - 1L, T_len), 1L)
     if (e < s || e > T_len || s < 1L) next
-    
+
     best <- .score_best_split_interval(prep, s, e, min_segment)
     if (is.finite(best$cp) && best$gain > 0) {
       candidates[[length(candidates) + 1L]] <- list(cp = as.integer(best$cp), gain = as.numeric(best$gain))
     }
-    
+
     if (verbose && m %% 20 == 0) {
       message(sprintf("  WBS interval %d/%d (score scan)", m, n_intervals))
     }
   }
-  
+
   if (length(candidates) == 0) {
     out <- integer(0)
     attr(out, "score_gain_by_cp") <- numeric(0)
     attr(out, "score_gain_curve") <- rep(NA_real_, T_len)
     return(out)
   }
-  
+
   cps <- vapply(candidates, `[[`, integer(1), "cp")
   gains <- vapply(candidates, `[[`, numeric(1), "gain")
   unique_cps <- unique(cps)
@@ -810,11 +805,11 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   T_len <- prep$T_len
   candidates <- integer(0)
   gains <- numeric(0)
-  
+
   .bs_recursive_score <- function(start, end) {
     len <- end - start + 1L
     if (len < 2L * min_segment + 1L) return(invisible(NULL))
-    
+
     best <- .score_best_split_interval(prep, start, end, min_segment)
     if (is.finite(best$cp) && best$gain > 0) {
       cp <- as.integer(best$cp)
@@ -825,7 +820,7 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
     }
     invisible(NULL)
   }
-  
+
   .bs_recursive_score(1L, T_len)
   if (verbose) message(sprintf("  BS score candidates found: %d", length(candidates)))
   if (length(candidates) == 0L) {
@@ -847,87 +842,72 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 #' @keywords internal
 .wbs_candidates <- function(Y, Q, Q2, type, distribution, block_sigma,
                             use_cpp, min_segment, max_iter, tol, n_init,
-                            n_intervals, verbose) {
-  
+                            n_intervals, verbose, elbo_fun = NULL) {
+
   T_len <- dim(Y)[1]
   min_interval <- 2 * min_segment + 1
-  
+
   if (T_len < min_interval) return(integer(0))
-  
+
+  # Segment ELBOs are cached by time set, so repeated intervals are not refitted;
+  # all fits use the same settings as the permutation test (PARROT >= 1.1.0).
+  E <- if (is.null(elbo_fun)) {
+    .segment_elbo_cache(Y, Q, Q2, type, distribution, block_sigma, use_cpp, max_iter, tol, n_init)
+  } else elbo_fun
+
   # Safe sample function (avoids R's sample(n,1) returning sample(1:n,1))
   safe_sample <- function(x, n = 1) {
     if (length(x) == 1) x else sample(x, n)
   }
-  
+
   candidates <- list()
-  
+
   for (m in 1:n_intervals) {
     # Random interval
     s <- safe_sample(1:(T_len - min_interval + 1), 1)
     e <- safe_sample((s + min_interval - 1):T_len, 1)
-    
+
     # Validate interval (defensive check)
     if (e < s || e > T_len || s < 1) next
-    
-    Y_sub <- Y[s:e, , , drop = FALSE]
+
     T_sub <- e - s + 1
     scan_range <- min_segment:(T_sub - min_segment)
-    
+
     if (length(scan_range) < 1) next
-    
-    # Null fit for this interval
-    null_fit <- tryCatch(
-      fit_sbm(Y_sub, Q, Q2, type, distribution, block_sigma, use_cpp,
-              max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
-      error = function(e) list(elbo = -Inf)
-    )
-    
+
+    null_elbo <- E(s:e)
     best_cp <- NA
     best_gain <- 0
-    
+
     for (t in scan_range) {
-      Y_l <- Y_sub[1:t, , , drop = FALSE]
-      Y_r <- Y_sub[(t+1):T_sub, , , drop = FALSE]
-      
-      fit_l <- tryCatch(
-        fit_sbm(Y_l, Q, Q2, type, distribution, block_sigma, use_cpp,
-                max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      fit_r <- tryCatch(
-        fit_sbm(Y_r, Q, Q2, type, distribution, block_sigma, use_cpp,
-                max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      
-      gain <- fit_l$elbo + fit_r$elbo - null_fit$elbo
-      
+      gain <- E(s:(s + t - 1)) + E((s + t):e) - null_elbo
+
       # Guard against NA/NaN gains (can happen with -Inf elbos)
       if (!is.na(gain) && is.finite(gain) && gain > best_gain) {
         best_gain <- gain
         best_cp <- t
       }
     }
-    
+
     if (!is.na(best_cp) && best_gain > 0) {
       cp_global <- s + best_cp - 1
       candidates[[length(candidates) + 1]] <- list(cp = cp_global, gain = best_gain)
     }
-    
+
     if (verbose && m %% 20 == 0) {
       message(sprintf("  WBS interval %d/%d", m, n_intervals))
     }
   }
-  
+
   if (length(candidates) == 0) return(integer(0))
-  
+
   # Aggregate: keep unique positions with max gain
   cps <- sapply(candidates, `[[`, "cp")
   gains <- sapply(candidates, `[[`, "gain")
-  
+
   unique_cps <- unique(cps)
   max_gains <- sapply(unique_cps, function(cp) max(gains[cps == cp]))
-  
+
   # Sort by gain
   ord <- order(max_gains, decreasing = TRUE)
   return(unique_cps[ord])
@@ -936,65 +916,49 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 #' Binary Segmentation to find candidates
 #' @keywords internal
 .bs_candidates <- function(Y, Q, Q2, type, distribution, block_sigma,
-                           use_cpp, min_segment, max_iter, tol, n_init, verbose) {
-  
+                           use_cpp, min_segment, max_iter, tol, n_init, verbose,
+                           elbo_fun = NULL) {
+
   T_len <- dim(Y)[1]
   candidates <- integer(0)
-  
+  E <- if (is.null(elbo_fun)) {
+    .segment_elbo_cache(Y, Q, Q2, type, distribution, block_sigma, use_cpp, max_iter, tol, n_init)
+  } else elbo_fun
+
   # Recursive helper
   .bs_recursive <- function(start, end) {
     len <- end - start + 1
     if (len < 2 * min_segment + 1) return()
-    
-    Y_sub <- Y[start:end, , , drop = FALSE]
+
     T_sub <- len
     scan_range <- min_segment:(T_sub - min_segment)
-    
+
     if (length(scan_range) < 1) return()
-    
-    null_fit <- tryCatch(
-      fit_sbm(Y_sub, Q, Q2, type, distribution, block_sigma, use_cpp,
-              max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
-      error = function(e) list(elbo = -Inf)
-    )
-    
+
+    null_elbo <- E(start:end)
     best_cp <- NA
     best_gain <- 0
-    
+
     for (t in scan_range) {
-      Y_l <- Y_sub[1:t, , , drop = FALSE]
-      Y_r <- Y_sub[(t+1):T_sub, , , drop = FALSE]
-      
-      fit_l <- tryCatch(
-        fit_sbm(Y_l, Q, Q2, type, distribution, block_sigma, use_cpp,
-                max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      fit_r <- tryCatch(
-        fit_sbm(Y_r, Q, Q2, type, distribution, block_sigma, use_cpp,
-                max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
-        error = function(e) list(elbo = -Inf)
-      )
-      
-      gain <- fit_l$elbo + fit_r$elbo - null_fit$elbo
-      
+      gain <- E(start:(start + t - 1)) + E((start + t):end) - null_elbo
+
       # Guard against NA/NaN gains (can happen with -Inf elbos)
       if (!is.na(gain) && is.finite(gain) && gain > best_gain) {
         best_gain <- gain
         best_cp <- t
       }
     }
-    
+
     if (!is.na(best_cp) && best_gain > 0) {
       cp_global <- start + best_cp - 1
       candidates <<- c(candidates, cp_global)
-      
+
       # Recurse on both sides
       .bs_recursive(start, cp_global)
       .bs_recursive(cp_global + 1, end)
     }
   }
-  
+
   .bs_recursive(1, T_len)
   return(candidates)
 }
@@ -1010,14 +974,14 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
   candidates <- candidates[!duplicated(candidates)]
 
   selected <- integer(0)
-  
+
   for (cp in candidates) {
     if (length(selected) == 0 || min(abs(selected - cp)) >= min_segment) {
       selected <- c(selected, cp)
     }
     if (length(selected) >= max_cps) break
   }
-  
+
   return(sort(selected))
 }
 
@@ -1025,28 +989,28 @@ detect_multiple_cp <- function(Y, Q, Q2 = NULL,
 #' @keywords internal
 .fit_final_segments <- function(Y, cps, Q, Q2, type, distribution,
                                  block_sigma, use_cpp, max_iter, tol, n_init) {
-  
+
   T_len <- dim(Y)[1]
   boundaries <- c(0, sort(cps), T_len)
   n_segments <- length(boundaries) - 1
-  
+
   segments <- vector("list", n_segments)
-  
+
   for (s in 1:n_segments) {
     start_t <- boundaries[s] + 1
     end_t <- boundaries[s + 1]
-    
+
     Y_seg <- Y[start_t:end_t, , , drop = FALSE]
-    
+
     fit <- tryCatch(
       fit_sbm(Y_seg, Q, Q2, type, distribution, block_sigma, use_cpp,
               max_iter, tol, n_init, FALSE),
       error = function(e) NULL
     )
-    
+
     segments[[s]] <- list(start = start_t, end = end_t, fit = fit)
   }
-  
+
   return(segments)
 }
 
@@ -1065,7 +1029,7 @@ print.cp_detection <- function(x, ...) {
   cat(sprintf("Clusters: Q=%d", x$Q))
   if (x$type == "bipartite") cat(sprintf(", Q2=%d", x$Q2))
   cat("\n\n")
-  
+
   if (x$significant) {
     cat(sprintf("Change point detected: t = %d\n", x$cp_est))
     cat(sprintf("LR statistic: %.4f (df=%d)\n", x$lr_stat, x$df))
@@ -1077,7 +1041,7 @@ print.cp_detection <- function(x, ...) {
     cat("No significant change point detected\n")
     cat(sprintf("P-value: %.4f (threshold: %.4f)\n", x$pvalue, x$alpha))
   }
-  
+
   invisible(x)
 }
 
@@ -1088,53 +1052,53 @@ print.cp_detection <- function(x, ...) {
 #' PELT algorithm for optimal change point detection
 #' @keywords internal
 .detect_pelt <- function(Y, Q, Q2, type, distribution, penalty, block_sigma,
-                         use_cpp, min_segment, max_cps, max_iter, tol, 
+                         use_cpp, min_segment, max_cps, max_iter, tol,
                          n_init, verbose) {
-  
+
   dims <- dim(Y)
   T_len <- dims[1]
   N1 <- dims[2]
   N2 <- dims[3]
-  
+
   # Compute penalty value (β per change point)
-  beta <- .compute_pelt_penalty(penalty, Q, Q2, type, distribution, 
+  beta <- .compute_pelt_penalty(penalty, Q, Q2, type, distribution,
                                  block_sigma, N1, N2, T_len)
-  
+
   if (verbose) {
     message(sprintf("PELT: T=%d, penalty=%.2f", T_len, beta))
     message("Precomputing segment costs...")
   }
-  
+
   # Precompute segment costs
-  cost_matrix <- .precompute_costs_pelt(Y, Q, Q2, type, distribution, 
+  cost_matrix <- .precompute_costs_pelt(Y, Q, Q2, type, distribution,
                                          block_sigma, use_cpp, min_segment,
                                          max_iter, tol, n_init, verbose)
-  
+
   if (verbose) message("Running PELT dynamic programming...")
-  
+
   # Run PELT dynamic programming
   pelt_result <- .pelt_dp(cost_matrix, beta, min_segment, T_len, verbose)
-  
+
   # Apply max_cps constraint if specified
   cps <- pelt_result$change_points
   if (!is.null(max_cps) && length(cps) > max_cps) {
     if (verbose) message(sprintf("Limiting to %d CPs (found %d)", max_cps, length(cps)))
     cps <- cps[1:max_cps]
   }
-  
+
   if (verbose) {
     if (length(cps) > 0) {
-      message(sprintf("Detected %d change point(s): %s", 
+      message(sprintf("Detected %d change point(s): %s",
                       length(cps), paste(cps, collapse = ", ")))
     } else {
       message("No change points detected")
     }
   }
-  
+
   # Fit segments with detected CPs
   segments <- .fit_final_segments(Y, cps, Q, Q2, type, distribution,
                                    block_sigma, use_cpp, max_iter, tol, n_init)
-  
+
   result <- list(
     cps = sort(cps),
     n_cps = length(cps),
@@ -1152,9 +1116,9 @@ print.cp_detection <- function(x, ...) {
     Q2 = Q2,
     block_sigma = block_sigma
   )
-  
+
   class(result) <- c("multi_cp_detection", "list")
-  
+
   return(result)
 }
 
@@ -1163,7 +1127,7 @@ print.cp_detection <- function(x, ...) {
 #' @keywords internal
 .compute_pelt_penalty <- function(penalty, Q, Q2, type, distribution,
                                    block_sigma, N1, N2, T_len) {
-  
+
   # Number of parameters per segment
   if (type == "unipartite") {
     n_mu <- Q * (Q + 1) / 2  # Symmetric matrix
@@ -1172,7 +1136,7 @@ print.cp_detection <- function(x, ...) {
     n_mu <- Q * Q2           # Full matrix
     n_alpha <- (Q - 1) + (Q2 - 1)
   }
-  
+
   if (distribution == "gaussian") {
     if (block_sigma) {
       n_sigma <- if (type == "unipartite") Q * (Q + 1) / 2 else Q * Q2
@@ -1182,15 +1146,15 @@ print.cp_detection <- function(x, ...) {
   } else {
     n_sigma <- 0
   }
-  
+
   n_params <- n_mu + n_sigma + n_alpha
-  
+
   if (is.numeric(penalty)) {
     return(penalty)
   }
-  
+
   n_obs <- N1 * N2 * T_len
-  
+
   if (penalty == "BIC") {
     beta <- 0.5 * n_params * log(n_obs)
   } else if (penalty == "AIC") {
@@ -1200,7 +1164,7 @@ print.cp_detection <- function(x, ...) {
   } else {
     beta <- 0.5 * n_params * log(n_obs)  # Default to BIC
   }
-  
+
   return(beta)
 }
 
@@ -1208,36 +1172,36 @@ print.cp_detection <- function(x, ...) {
 #' Precompute segment costs for PELT
 #' @keywords internal
 .precompute_costs_pelt <- function(Y, Q, Q2, type, distribution, block_sigma,
-                                    use_cpp, min_segment, max_iter, tol, 
+                                    use_cpp, min_segment, max_iter, tol,
                                     n_init, verbose) {
-  
+
   T_len <- dim(Y)[1]
   cost_matrix <- matrix(Inf, T_len, T_len)
-  
+
   n_computed <- 0
   n_total <- sum(sapply(1:(T_len - min_segment + 1), function(s) T_len - s - min_segment + 2))
-  
+
   for (s in 1:(T_len - min_segment + 1)) {
     for (e in (s + min_segment - 1):T_len) {
-      
+
       Y_seg <- Y[s:e, , , drop = FALSE]
-      
+
       fit <- tryCatch(
         fit_sbm(Y_seg, Q, Q2, type, distribution, block_sigma, use_cpp,
                 max_iter %/% 2, tol * 10, max(1, n_init %/% 2), FALSE),
         error = function(e) list(elbo = -Inf)
       )
-      
+
       cost_matrix[s, e] <- -fit$elbo
       n_computed <- n_computed + 1
-      
+
       if (verbose && n_computed %% 50 == 0) {
-        message(sprintf("  Segment costs: %d/%d (%.1f%%)", 
+        message(sprintf("  Segment costs: %d/%d (%.1f%%)",
                         n_computed, n_total, 100 * n_computed / n_total))
       }
     }
   }
-  
+
   return(cost_matrix)
 }
 
@@ -1245,15 +1209,15 @@ print.cp_detection <- function(x, ...) {
 #' PELT dynamic programming with pruning
 #' @keywords internal
 .pelt_dp <- function(cost_matrix, beta, min_segment, T_len, verbose) {
-  
+
   F <- rep(Inf, T_len + 1)
   F[1] <- -beta
   cp <- rep(0, T_len + 1)
   R <- c(0)
-  
+
   for (t in min_segment:T_len) {
     candidates <- R[R <= (t - min_segment)]
-    
+
     if (length(candidates) == 0) {
       if (t >= min_segment && is.finite(cost_matrix[1, t])) {
         F[t + 1] <- cost_matrix[1, t] + beta
@@ -1262,22 +1226,22 @@ print.cp_detection <- function(x, ...) {
       R <- unique(c(R, t))
       next
     }
-    
+
     costs <- sapply(candidates, function(tau) {
       seg_cost <- cost_matrix[tau + 1, t]
       if (is.infinite(seg_cost)) return(Inf)
       F[tau + 1] + seg_cost + beta
     })
-    
+
     if (all(is.infinite(costs))) {
       R <- unique(c(R, t))
       next
     }
-    
+
     best_idx <- which.min(costs)
     F[t + 1] <- costs[best_idx]
     cp[t + 1] <- candidates[best_idx]
-    
+
     # Pruning
     new_R <- c()
     for (tau in R) {
@@ -1293,12 +1257,12 @@ print.cp_detection <- function(x, ...) {
       }
     }
     R <- unique(c(new_R, t))
-    
+
     if (verbose && t %% 20 == 0) {
       message(sprintf("  t=%d/%d, |R|=%d", t, T_len, length(R)))
     }
   }
-  
+
   # Backtrack
   cps <- integer(0)
   current <- T_len
@@ -1306,7 +1270,7 @@ print.cp_detection <- function(x, ...) {
     cps <- c(cp[current + 1], cps)
     current <- cp[current + 1]
   }
-  
+
   return(list(change_points = cps, total_cost = F[T_len + 1]))
 }
 
@@ -1322,7 +1286,7 @@ print.multi_cp_detection <- function(x, ...) {
   cat(sprintf("Clusters: Q=%d", x$Q))
   if (x$type == "bipartite") cat(sprintf(", Q2=%d", x$Q2))
   cat("\n\n")
-  
+
   if (x$n_cps == 0) {
     cat("No change points detected\n")
   } else {
@@ -1331,13 +1295,13 @@ print.multi_cp_detection <- function(x, ...) {
       cat(sprintf("  CP %d: t = %d\n", i, x$cps[i]))
     }
   }
-  
+
   cat(sprintf("\nSegments: %d\n", length(x$segments)))
   for (s in seq_along(x$segments)) {
     seg <- x$segments[[s]]
     cat(sprintf("  Segment %d: [%d, %d] (length %d)\n",
                 s, seg$start, seg$end, seg$end - seg$start + 1))
   }
-  
+
   invisible(x)
 }

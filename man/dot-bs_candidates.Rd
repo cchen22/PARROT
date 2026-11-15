@@ -16,7 +16,8 @@
   max_iter,
   tol,
   n_init,
-  verbose
+  verbose,
+  elbo_fun = NULL
 )
 }
 \description{

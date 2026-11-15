@@ -3,90 +3,46 @@
 #' Compute p-values, adjust for multiple testing, and assess significance.
 #' Supports Wilks' asymptotic test, permutation, and bootstrap methods.
 
-#' Compute P-value for Change Point Detection
+#' Compute P-values for Detected Change Points
 #'
-#' Compute the p-value for a detected change point using various methods.
+#' Computes, for each change point of a \code{parrot_result}, the p-value of the
+#' split held fixed inside the window between the neighbouring change points.
+#' The resampled statistics use the fit settings stored in the result.
 #'
-#' @param result A cp_detection or multi_cp_detection object
-#' @param method Method: "wilks", "permutation", or "bootstrap"
-#' @param n_perm Number of permutations (for permutation/bootstrap)
+#' @param result A \code{parrot_result} (or a single-CP \code{cp_detection} for
+#'   \code{method = "wilks"})
+#' @param method "permutation" (conditional time-label permutation, exact when
+#'   feasible), "wilks", "stationary_bootstrap" or "bootstrap" (parametric)
+#' @param n_perm Number of random permutations / bootstrap samples when the
+#'   p-value is not exact
+#' @param permutation_scope "global" (default) or "local"
+#' @param exact_max Enumerate all configurations when at most this many
 #' @param verbose Print progress
-#' @return List with p-value and additional statistics
+#' @return List with one entry per change point (raw, Bonferroni and BH
+#'   adjusted p-values)
 #' @export
 #' @examples
 #' \dontrun{
-#' # Detect change point
-#' result <- detect_single_cp(data$Y, Q = 2, type = "unipartite", 
-#'                           distribution = "bernoulli")
-#' 
-#' # Compute p-value using Wilks test
-#' pval <- compute_pvalue(result, method = "wilks")
-#' print(pval$pvalue)
+#' res <- parrot(data$Y, Q = 2, multiple = FALSE, min_segment = 2, compute_pvalues = FALSE)
+#' compute_pvalue(res, method = "wilks")
 #' }
-compute_pvalue <- function(result, 
-                           method = c("wilks", "permutation", "bootstrap"),
-                           n_perm = 500,
+compute_pvalue <- function(result,
+                           method = c("permutation", "wilks", "stationary_bootstrap", "bootstrap"),
+                           n_perm = 99,
+                           permutation_scope = c("global", "local"),
+                           exact_max = 5040,
                            verbose = FALSE) {
-  
   method <- match.arg(method)
-  
-  # Extract what we need from result
-  if (inherits(result, "parrot_result")) {
-    lr_stat <- if (!is.null(result$icl_h1)) 2 * (result$icl_h1 - result$icl_h0) else NA
-    df <- .compute_pvalue_df(result$Q, result$Q2, result$type, result$distribution)
-    null_elbo <- if (!is.null(result$icl_h0)) result$icl_h0 else NA
-    alt_elbo <- if (!is.null(result$icl_h1)) result$icl_h1 else NA
-  } else if (inherits(result, "cp_detection")) {
-    lr_stat <- result$lr_stat
-    df <- result$df
-    null_elbo <- result$null_elbo
-    alt_elbo <- result$alt_elbo
-  } else if (inherits(result, "multi_cp_detection")) {
-    # For multiple CPs, compute overall LRT
-    total_seg_elbo <- sum(sapply(result$segments, function(s) {
-      if (!is.null(s$fit)) s$fit$elbo else 0
-    }))
-    
-    # Need null fit for comparison
-    if (verbose) message("Computing p-value for multiple change points...")
-    null_elbo <- if (!is.null(result$segments[[1]]$fit$elbo) && result$n_cps == 0) {
-      result$segments[[1]]$fit$elbo
-    } else {
-      NA
-    }
-    lr_stat <- if (!is.na(null_elbo)) 2 * (total_seg_elbo - null_elbo) else NA
-    df <- result$n_cps * .compute_pvalue_df(result$Q, result$Q2, result$type, result$distribution)
-    alt_elbo <- total_seg_elbo
-  } else {
-    stop("result must be a parrot_result, cp_detection, or multi_cp_detection object")
+  permutation_scope <- match.arg(permutation_scope)
+  if (inherits(result, "cp_detection")) {
+    if (method != "wilks") stop("Resampling p-values need the data: use a parrot_result.")
+    return(list(list(cp = result$cp_raw, lr_stat = result$lr_stat, df = result$df,
+                     pvalue_raw = .pvalue_wilks(result$lr_stat, result$df),
+                     pvalue_method = "wilks")))
   }
-  
-  if (method == "wilks") {
-    pvalue <- .pvalue_wilks(lr_stat, df)
-  } else if (method == "permutation") {
-    if (!inherits(result, c("cp_detection", "parrot_result"))) {
-      warning("Permutation test only fully supported for single CP; using Wilks")
-      pvalue <- .pvalue_wilks(lr_stat, df)
-    } else {
-      pvalue <- .pvalue_permutation(result, n_perm, verbose)
-    }
-  } else {  # bootstrap
-    if (!inherits(result, c("cp_detection", "parrot_result"))) {
-      warning("Bootstrap test only fully supported for single CP; using Wilks")
-      pvalue <- .pvalue_wilks(lr_stat, df)
-    } else {
-      pvalue <- .pvalue_bootstrap(result, n_perm, verbose)
-    }
-  }
-  
-  return(list(
-    pvalue = pvalue,
-    method = method,
-    lr_stat = lr_stat,
-    df = df,
-    null_elbo = null_elbo,
-    alt_elbo = alt_elbo
-  ))
+  if (!inherits(result, "parrot_result")) stop("result must be a parrot_result object")
+  .compute_pvalues_for_parrot(result, method, verbose, n_perm = n_perm,
+                              permutation_scope = permutation_scope, exact_max = exact_max)
 }
 
 #' Adjust P-values for Multiple Testing
@@ -100,106 +56,75 @@ compute_pvalue <- function(result,
 #' @examples
 #' pvals <- c(0.01, 0.04, 0.03, 0.5)
 #' adjust_pvalues(pvals, method = "BH")
-adjust_pvalues <- function(pvalues, 
+adjust_pvalues <- function(pvalues,
                            method = c("bonferroni", "holm", "BH", "BY", "none")) {
   method <- match.arg(method)
-  
+
   if (method == "none") {
     return(pvalues)
   }
-  
+
   p.adjust(pvalues, method = method)
 }
 
 #' Test Significance of Detected Change Points
 #'
-#' Perform hypothesis testing for each detected change point.
+#' Tests every change point of a \code{parrot_result} (see
+#' \code{\link{compute_pvalue}}) and adjusts for multiple testing.
 #'
-#' @param result A multi_cp_detection or parrot_result object
+#' @param result A parrot_result object
 #' @param alpha Significance level
 #' @param adjust Adjustment method for multiple testing
+#' @param method P-value method passed to \code{\link{compute_pvalue}}
+#' @param n_perm Number of random permutations / bootstrap samples
 #' @param verbose Print progress
-#' @return List with test results for each change point
+#' @return Object of class "cp_significance_test"
 #' @export
 test_significance <- function(result,
                               alpha = 0.05,
-                              adjust = c("BH", "bonferroni", "holm", "BY", "none"),
+                              adjust = c("bonferroni", "BH", "holm", "BY", "none"),
+                              method = c("permutation", "wilks", "stationary_bootstrap", "bootstrap"),
+                              n_perm = 99,
                               verbose = FALSE) {
-  
+
   adjust <- match.arg(adjust)
-  
-  if (!inherits(result, c("parrot_result", "multi_cp_detection"))) {
-    stop("result must be a parrot_result or multi_cp_detection object")
-  }
-  
+  method <- match.arg(method)
+  if (!inherits(result, "parrot_result")) stop("result must be a parrot_result object")
+
   if (result$n_cps == 0) {
     if (verbose) message("No change points to test")
-    return(list(
-      significant = logical(0),
-      pvalues = numeric(0),
-      adjusted_pvalues = numeric(0),
-      alpha = alpha,
-      adjust_method = adjust
-    ))
+    out <- list(cps = integer(0), significant = logical(0), pvalues = numeric(0),
+                adjusted_pvalues = numeric(0), n_significant = 0L, alpha = alpha,
+                adjust_method = adjust)
+    class(out) <- c("cp_significance_test", "list")
+    return(out)
   }
-  
-  # Compute p-value for each CP
-  pvalues <- numeric(result$n_cps)
-  
-  for (i in seq_along(result$cps)) {
-    cp <- result$cps[i]
-    
-    # Find segments adjacent to this CP
-    seg_before_idx <- which(sapply(result$segments, function(s) s$end == cp))
-    seg_after_idx <- which(sapply(result$segments, function(s) s$start == cp + 1))
-    
-    if (length(seg_before_idx) == 1 && length(seg_after_idx) == 1) {
-      seg_before <- result$segments[[seg_before_idx]]
-      seg_after <- result$segments[[seg_after_idx]]
-      
-      if (!is.null(seg_before$fit) && !is.null(seg_after$fit)) {
-        # Compute LRT for this specific CP
-        combined_elbo <- seg_before$fit$elbo + seg_after$fit$elbo
-        
-        # Simple approximation: use Wilks
-        df <- .compute_pvalue_df(result$Q, result$Q2, result$type, result$distribution)
-        # Estimate gain (simplified)
-        lr_stat <- 10  # Placeholder if not available
-        pvalues[i] <- pchisq(lr_stat, df = df, lower.tail = FALSE)
-      } else {
-        pvalues[i] <- NA
-      }
-    } else {
-      pvalues[i] <- NA
-    }
-  }
-  
-  # Adjust for multiple testing
+
+  pv <- compute_pvalue(result, method = method, n_perm = n_perm, verbose = verbose)
+  pvalues <- vapply(pv, function(x) x$pvalue_raw, numeric(1))
   adjusted_pvalues <- adjust_pvalues(pvalues, method = adjust)
-  
-  # Determine significance
   significant <- adjusted_pvalues < alpha
   significant[is.na(significant)] <- FALSE
-  
+
   test_result <- list(
-    cps = result$cps,
+    cps = vapply(pv, function(x) as.numeric(x$cp), numeric(1)),
     significant = significant,
     pvalues = pvalues,
     adjusted_pvalues = adjusted_pvalues,
     n_significant = sum(significant),
     alpha = alpha,
-    adjust_method = adjust
+    adjust_method = adjust,
+    pvalue_method = method
   )
-  
   class(test_result) <- c("cp_significance_test", "list")
-  
+
   if (verbose) {
-    message(sprintf("Tested %d change points", length(result$cps)))
-    message(sprintf("Significant at alpha=%.2f after %s correction: %d", 
+    message(sprintf("Tested %d change points", length(test_result$cps)))
+    message(sprintf("Significant at alpha=%.2f after %s correction: %d",
                     alpha, adjust, sum(significant)))
   }
-  
-  return(test_result)
+
+  test_result
 }
 
 #' Profile Likelihood Confidence Interval
@@ -245,73 +170,11 @@ profile_likelihood_ci <- function(result, level = 0.95) {
 # INTERNAL HELPER FUNCTIONS
 # =============================================================================
 
-#' Compute DF for p-value
-#' @keywords internal
-.compute_pvalue_df <- function(Q, Q2, type, distribution) {
-  if (type == "unipartite") {
-    n_mu <- Q * (Q + 1) / 2
-  } else {
-    n_mu <- Q * Q2
-  }
-  
-  if (distribution == "gaussian") {
-    return(n_mu + 1)
-  } else {
-    return(n_mu)
-  }
-}
-
 #' Wilks p-value
 #' @keywords internal
 .pvalue_wilks <- function(lr_stat, df) {
   if (is.na(lr_stat) || is.na(df)) return(NA)
   pchisq(lr_stat, df = df, lower.tail = FALSE)
-}
-
-#' Permutation p-value
-#' @keywords internal
-.pvalue_permutation <- function(result, n_perm, verbose) {
-  
-  # This would require the original data, which may not be available
-  # Fall back to Wilks if we can't do permutation
-  if (is.null(result$null_fit) || is.na(result$lr_stat)) {
-    warning("Insufficient information for permutation test; using Wilks")
-    return(.pvalue_wilks(result$lr_stat, result$df))
-  }
-  
-  observed_stat <- result$lr_stat
-  
-  # Generate null distribution by time permutation
-  # This is a simplified version - full implementation would need Y
-  if (verbose) message(sprintf("Running %d permutations...", n_perm))
-  
-  # Approximate with chi-squared
-  null_stats <- rchisq(n_perm, df = result$df)
-  
-  pvalue <- mean(null_stats >= observed_stat)
-  
-  return(pvalue)
-}
-
-#' Bootstrap p-value
-#' @keywords internal
-.pvalue_bootstrap <- function(result, n_boot, verbose) {
-  
-  if (is.null(result$null_fit) || is.na(result$lr_stat)) {
-    warning("Insufficient information for bootstrap test; using Wilks")
-    return(.pvalue_wilks(result$lr_stat, result$df))
-  }
-  
-  observed_stat <- result$lr_stat
-  
-  if (verbose) message(sprintf("Running %d bootstrap samples...", n_boot))
-  
-  # Approximate with chi-squared (simplified)
-  null_stats <- rchisq(n_boot, df = result$df)
-  
-  pvalue <- mean(null_stats >= observed_stat)
-  
-  return(pvalue)
 }
 
 # =============================================================================

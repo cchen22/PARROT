@@ -15,14 +15,15 @@ detect_multiple_cp(
   block_sigma = FALSE,
   use_cpp = TRUE,
   min_segment = 5,
-  max_cps = 10,
+  max_cps = 3,
   alpha = 0.05,
   penalty = "BIC",
   max_iter = 100,
   tol = 1e-06,
   n_init = 5,
-  n_intervals = 100,
-  verbose = FALSE
+  n_intervals = 50,
+  verbose = FALSE,
+  fit_seed = 1L
 )
 }
 \arguments{
@@ -62,6 +63,8 @@ or "score" (fast approximation using a fixed global fit)}
 \item{n_intervals}{Number of random intervals for WBS}
 
 \item{verbose}{Print progress}
+
+\item{fit_seed}{Seed of the segment fits (default 1); every SBM fit of a segment uses its own seed derived from the segment's time points and \code{fit_seed} (see \code{\link{parrot}}).}
 }
 \value{
 Object of class "multi_cp_detection" with results

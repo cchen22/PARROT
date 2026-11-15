@@ -4,9 +4,27 @@
 \alias{.compute_pvalues_for_parrot}
 \title{Compute p-values for parrot result}
 \usage{
-.compute_pvalues_for_parrot(result, method, verbose)
+.compute_pvalues_for_parrot(
+  result,
+  method = "permutation",
+  verbose = FALSE,
+  n_perm = 99,
+  permutation_scope = "global",
+  exact_max = 5040,
+  sb_block = NULL,
+  n_init = NULL,
+  max_iter = NULL,
+  tol = NULL,
+  rescan = NULL,
+  n_cores = NULL
+)
 }
 \description{
-Compute p-values for parrot result
+For every reported change point the split is held fixed and tested inside the
+window bounded by the neighbouring change points (or the ends of the series).
+All statistics are computed with the fit settings stored in \code{result}
+(\code{n_init}, \code{max_iter}, \code{tol}), identical for observed and
+resampled series. Bonferroni and BH adjustments are over the reported
+change points.
 }
 \keyword{internal}

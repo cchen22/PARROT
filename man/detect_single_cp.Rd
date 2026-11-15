@@ -18,7 +18,8 @@ detect_single_cp(
   max_iter = 100,
   tol = 1e-06,
   n_init = 5,
-  verbose = FALSE
+  verbose = FALSE,
+  fit_seed = 1L
 )
 }
 \arguments{
@@ -50,6 +51,8 @@ or "score" (fast approximation using a fixed global fit)}
 \item{n_init}{Number of random initializations}
 
 \item{verbose}{Print progress}
+
+\item{fit_seed}{Seed of the segment fits (default 1); every SBM fit of a segment uses its own seed derived from the segment's time points and \code{fit_seed} (see \code{\link{parrot}}).}
 }
 \value{
 Object of class "cp_detection" with results
@@ -69,7 +72,7 @@ data <- simulate_sbm_cp(N = 30, T_len = 60, cp_time = 30, Q = 2,
                         type = "unipartite", distribution = "bernoulli",
                         theta1 = list(prob = matrix(c(0.8, 0.2, 0.2, 0.8), 2, 2)),
                         theta2 = list(prob = matrix(c(0.2, 0.8, 0.8, 0.2), 2, 2)))
-result <- detect_single_cp(data$Y, Q = 2, type = "unipartite", 
+result <- detect_single_cp(data$Y, Q = 2, type = "unipartite",
                           distribution = "bernoulli")
 print(result$cp_est)
 }

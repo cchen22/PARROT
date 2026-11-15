@@ -67,11 +67,44 @@ plot(fit)
 
 ## Common Arguments
 
-- `multiple`: use `FALSE` for fast single-CP detection.
-- `scan_method`: candidate split scan (`"profile"` or faster `"score"`).
-- `compute_cis`: compute confidence intervals.
-- `compute_pvalues`: compute p-values for detected change points.
-- `pvalue_method`: `"wilks"`, `"permutation"`, or `"bootstrap"`.
+- `Q`: number of communities; `Q = NULL` selects Q with the ICL gain-ratio rule
+  over `Q_range` (`q_stability = TRUE` adds a seed-stability check).
+- `multiple`: `FALSE` for one change point, `TRUE` for several (`method = "wbs"`
+  or `"bs"`, at most `max_cps`; `stop_rule = "test"` for test-based splitting).
+- `scan_method`: candidate split scan, `"profile"` (default) or `"score"`.
+- `pvalue_method`: `"permutation"` (default), `"wilks"`, `"stationary_bootstrap"`
+  or `"bootstrap"`.
+- `n_init`, `max_iter`: random initialisations and VEM iterations per fit.
+- `n_cores`: parallel segment fits for the resampling tests.
+
+## Speed versus accuracy
+
+The defaults favour accuracy. With T time points and minimum segment length m,
+the cost is dominated by the number of SBM fits:
+
+| Setting | SBM fits | Speed | Accuracy |
+|---|---|---|---|
+| `scan_method = "score"` | 1 (whole series) | fast | approximate; can miss changes that leave the whole-series fit without block structure (e.g. two communities swapping their connection pattern) |
+| `scan_method = "profile"` (default) | 2(T - 2m + 1) segment fits | slower | exact profile likelihood of every split |
+| `pvalue_method = "wilks"` | none | fast | chi-squared approximation; below the nominal level in our simulations, but not guaranteed (no finite-sample justification) |
+| `pvalue_method = "permutation"` (default) | the scan is repeated on every permuted series | slowest | valid type-I error for independent time points; exact when all configurations (at most `exact_max`) are enumerated. The statistic is the maximum profile likelihood ratio, also with `scan_method = "score"` |
+| `pvalue_method = "stationary_bootstrap"` | as permutation | slowest | for temporally dependent series |
+| `rescan = FALSE` | 2 per permuted series | fast | anti-conservative (the split is held fixed although it was chosen by the scan); not recommended |
+| `n_init = 20`, `max_iter = 200` (default) | per fit | slower | fewer local optima; reduce (e.g. 5 and 50) for quick exploration |
+
+Segment fits are cached by their set of time points, so the multiple change
+point search and the tests never refit the same segment, and `n_cores > 1`
+parallelises them without changing the result. For long series or large
+networks, a fast exploratory run is `scan_method = "score", pvalue_method =
+"wilks"`; the reported result should use the defaults.
+
+Type-I error at the 5% level in the simulations of the paper (independent time
+points, 6,000 series without change, 99 permutations): re-scan permutation 0.9%
+(at most 2.6% for every network type and baseline) and Wilks 1.2%; fixed-split
+permutation (`rescan = FALSE`) 5.5% overall but about 10% for binary networks. The parametric bootstrap
+(`"bootstrap"`) also holds the split fixed and should not be used for decisions.
+The permutation test is the default because its validity does not rest on an
+asymptotic approximation.
 
 ## Citation
 

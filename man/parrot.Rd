@@ -8,20 +8,33 @@ parrot(
   Y,
   Q = NULL,
   Q2 = NULL,
+  Q_range = 1:10,
+  q_stability = FALSE,
+  q_n_seeds = 5,
   type = NULL,
   distribution = "auto",
   multiple = TRUE,
   method = c("wbs", "bs", "pelt"),
+  stop_rule = c("max_cps", "test"),
   scan_method = c("profile", "score"),
-  block_sigma = TRUE,
+  block_sigma = FALSE,
   min_segment = 5,
-  max_cps = 10,
+  max_cps = 3,
   alpha = 0.05,
-  pvalue_method = c("wilks", "permutation", "bootstrap"),
+  pvalue_method = c("permutation", "wilks", "stationary_bootstrap", "bootstrap"),
+  permutation_scope = c("global", "local"),
+  rescan = TRUE,
+  exact_max = 5040,
+  n_perm = 99,
+  n_cores = 1,
+  fit_seed = 1L,
+  sb_block = NULL,
   use_cpp = TRUE,
-  n_init = 5,
-  max_iter = 100,
-  compute_pvalues = FALSE,
+  n_init = 20,
+  max_iter = 200,
+  tol = 1e-06,
+  n_intervals = 50,
+  compute_pvalues = TRUE,
   compute_cis = TRUE,
   compute_inference = NULL,
   verbose = FALSE
@@ -30,44 +43,98 @@ parrot(
 \arguments{
 \item{Y}{Network tensor (T x N x N for unipartite, T x N1 x N2 for bipartite)}
 
-\item{Q}{Number of clusters (or Q1 for bipartite). Can be:
-- NULL: automatically selected via ICL
-- Integer: use this exact value
-- Vector (e.g., 2:4): select best Q from this range via ICL}
+\item{Q}{Number of communities (Q1 for bipartite). NULL (default): selected
+with the ICL gain-ratio rule over \code{Q_range}; a vector: selected from
+these values; an integer: used as is.}
 
-\item{Q2}{Number of column clusters for bipartite (NULL for unipartite).
-Can also be a range like Q.}
+\item{Q2}{Number of column communities for bipartite networks (default: Q).}
+
+\item{Q_range}{Candidate values for the automatic selection of Q
+(default 1:10, truncated to at most N/2 nodes per community side).}
+
+\item{q_stability}{Also report, for each candidate Q, the mean pairwise
+adjusted Rand index of the memberships fitted from \code{q_n_seeds}
+independent sets of initialisations (default FALSE; adds fits).}
+
+\item{q_n_seeds}{Number of independent fits for \code{q_stability}.}
 
 \item{type}{Network type: "unipartite" or "bipartite" (auto-detected if NULL)}
 
 \item{distribution}{Edge distribution: "gaussian", "bernoulli", or "auto"}
 
-\item{multiple}{Detect multiple change points (TRUE) or single (FALSE)}
+\item{multiple}{Detect multiple change points (TRUE) or a single one (FALSE)}
 
-\item{method}{Search method: "wbs" (Wild Binary Segmentation), "bs" (Binary Segmentation), "pelt" (Pruned Exact Linear Time)}
+\item{method}{Candidate search for multiple change points: "wbs", "bs" or "pelt"}
 
-\item{scan_method}{Candidate-split scanning method: "profile" (full refit; default)
-or "score" (faster approximation, useful for long sequences)}
+\item{stop_rule}{Multiple change points: "max_cps" (default; up to
+\code{max_cps} candidates from \code{method}, each then tested and
+Bonferroni/BH adjusted) or "test" (test-based binary segmentation: a
+segment is split while the p-value of its best split is below
+\code{alpha}, at most \code{max_cps} change points).}
 
-\item{block_sigma}{Use block-specific variance for Gaussian (default: TRUE)}
+\item{scan_method}{Candidate-split scan: "profile" (default; both segments
+refitted at every split, i.e. the profile likelihood) or "score" (fast
+approximation from cumulative sufficient statistics of one global fit)}
+
+\item{block_sigma}{Block-specific variances for Gaussian edges (default
+FALSE: one variance shared by all blocks)}
 
 \item{min_segment}{Minimum segment length (default: 5)}
 
-\item{max_cps}{Maximum number of change points to detect (default: 10)}
+\item{max_cps}{Maximum number of change points (default: 3)}
 
 \item{alpha}{Significance level (default: 0.05)}
 
-\item{pvalue_method}{Method for p-values: "wilks", "permutation", "bootstrap"}
+\item{pvalue_method}{"permutation" (default; time-label permutation test
+conditional on the window between the neighbouring change points, with the
+scan repeated on every permuted series; exact enumeration when feasible),
+"wilks" (chi-squared approximation; fastest), "stationary_bootstrap"
+(block resampling that preserves short-range temporal dependence) or
+"bootstrap" (parametric). In single-CP mode the change point is declared
+when this p-value is below \code{alpha}.}
 
-\item{use_cpp}{Use C++ acceleration (default: TRUE, highly recommended)}
+\item{permutation_scope}{"global" (default; permute the time labels of the
+whole series) or "local" (permute only inside the window between the
+neighbouring change points)}
 
-\item{n_init}{Number of random initializations (default: 5)}
+\item{rescan}{Repeat the scan within the window on every permuted /
+bootstrapped series (default TRUE; controls the type-I error). FALSE holds
+the split fixed at the detected position, which ignores that the split was
+selected by the scan and is anti-conservative (PARROT < 1.1.0).}
 
-\item{max_iter}{Maximum VEM iterations (default: 100)}
+\item{exact_max}{Enumerate all distinct permutation configurations when
+there are at most this many (default 5040, i.e. all orderings of T = 7);
+otherwise Monte Carlo}
 
-\item{compute_pvalues}{Compute p-values (default: FALSE; adds extra fits)}
+\item{n_perm}{Number of random permutations or bootstrap samples when the
+p-value is not exact (default: 99, enough for a decision at alpha = 0.05; the
+smallest attainable p-value is 1/(n_perm + 1), so use e.g. 999 to report a p-value)}
 
-\item{compute_cis}{Compute confidence intervals (default: TRUE; adds extra fits)}
+\item{n_cores}{Number of cores for the segment fits of the permutation /
+bootstrap test (default 1)}
+
+\item{fit_seed}{Seed of the segment fits (default 1). Every SBM fit of a
+segment uses its own seed derived from the segment's time points and
+\code{fit_seed}, so the result does not depend on the global random state
+and the scan and the tests use the same fits; change it to check the
+sensitivity to the random initialisations.}
+
+\item{sb_block}{Mean block length of the stationary bootstrap (default
+ceiling(T^(1/3)))}
+
+\item{use_cpp}{Use C++ acceleration (default: TRUE)}
+
+\item{n_init}{Number of random initialisations per fit (default: 20)}
+
+\item{max_iter}{Maximum VEM iterations (default: 200)}
+
+\item{tol}{Convergence tolerance (default: 1e-6)}
+
+\item{n_intervals}{Number of random intervals for WBS (default: 50)}
+
+\item{compute_pvalues}{Compute p-values (default: TRUE)}
+
+\item{compute_cis}{Compute confidence intervals (default: TRUE)}
 
 \item{compute_inference}{Deprecated: sets both compute_pvalues and compute_cis}
 
@@ -78,20 +145,37 @@ Object of class "parrot_result" with detected change points and diagnostics
 }
 \description{
 Main function for change point detection in dynamic networks.
-Provides a unified interface for detecting single or multiple change points
-using optimal default settings.
+Provides a unified interface for detecting single or multiple change points.
 }
+\section{Speed versus accuracy}{
+
+The defaults favour accuracy. Fast options: \code{scan_method = "score"}
+(one fit of the whole series instead of two segment fits per split; can miss
+changes that leave the whole-series fit without block structure),
+\code{pvalue_method = "wilks"} (no resampling; conservative), smaller
+\code{n_init} / \code{max_iter}. Accurate options (defaults):
+\code{scan_method = "profile"}, \code{pvalue_method = "permutation"} with
+\code{rescan = TRUE} (the scan is repeated on every permuted series; the
+cost grows with \code{n_perm} or with the number of enumerated
+configurations), \code{n_init = 20}, \code{max_iter = 200}.
+\code{rescan = FALSE} and \code{pvalue_method = "bootstrap"} are fast but
+anti-conservative. \code{n_cores} parallelises the segment fits without
+changing the result. A quick exploratory run is
+\code{parrot(Y, scan_method = "score", pvalue_method = "wilks")}; a fixed
+\code{Q} and \code{compute_cis = FALSE} also save time. The package README
+("Speed versus accuracy") orders the p-value methods by type-I error.
+}
+
 \examples{
 \dontrun{
-# Simulate unipartite binary network with change point
-data <- simulate_sbm_cp(N = 30, T_len = 60, cp_time = 30, Q = 2,
+data <- simulate_sbm_cp(N = 30, T_len = 20, cp_time = 10, Q = 2,
                         type = "unipartite", distribution = "bernoulli",
                         theta1 = list(prob = matrix(c(0.8, 0.2, 0.2, 0.8), 2, 2)),
                         theta2 = list(prob = matrix(c(0.2, 0.8, 0.8, 0.2), 2, 2)))
-
-# Detect change point
-result <- parrot(data$Y, Q = 2)
+result <- parrot(data$Y, Q = 2, multiple = FALSE, min_segment = 2)
 print(result)
-plot(result)
+# fast settings
+fast <- parrot(data$Y, Q = 2, multiple = FALSE, min_segment = 2,
+               scan_method = "score", pvalue_method = "wilks", n_init = 5)
 }
 }

@@ -17,7 +17,8 @@
   tol,
   n_init,
   n_intervals,
-  verbose
+  verbose,
+  elbo_fun = NULL
 )
 }
 \description{

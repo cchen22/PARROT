@@ -1,7 +1,7 @@
 Package: PARROT
 Type: Package
 Title: Change Point Detection in Dynamic Networks Using SBM
-Version: 1.0.0
+Version: 1.1.0
 Authors@R: person("Chen", "Chen", email = "chenchen9945@gmail.com", role = c("aut", "cre"))
 Description: PARROT (Phase-Altering Regulatory Rewiring Over Time) provides
     efficient algorithms for detecting single and multiple change points in
@@ -21,7 +21,8 @@ Imports:
     Rcpp (>= 1.0.0),
     stats,
     graphics,
-    grDevices
+    grDevices,
+    utils
 LinkingTo: Rcpp
 Suggests:
     testthat (>= 3.0.0)

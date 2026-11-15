@@ -6,39 +6,46 @@
 \usage{
 compute_pvalue(
   result,
-  method = c("wilks", "permutation", "bootstrap"),
-  n_perm = 500,
+  method = c("permutation", "wilks", "stationary_bootstrap", "bootstrap"),
+  n_perm = 99,
+  permutation_scope = c("global", "local"),
+  exact_max = 5040,
   verbose = FALSE
 )
 }
 \arguments{
-\item{result}{A cp_detection or multi_cp_detection object}
+\item{result}{A \code{parrot_result} (or a single-CP \code{cp_detection} for
+\code{method = "wilks"})}
 
-\item{method}{Method: "wilks", "permutation", or "bootstrap"}
+\item{method}{"permutation" (conditional time-label permutation, exact when
+feasible), "wilks", "stationary_bootstrap" or "bootstrap" (parametric)}
 
-\item{n_perm}{Number of permutations (for permutation/bootstrap)}
+\item{n_perm}{Number of random permutations / bootstrap samples when the
+p-value is not exact}
+
+\item{permutation_scope}{"global" (default) or "local"}
+
+\item{exact_max}{Enumerate all configurations when at most this many}
 
 \item{verbose}{Print progress}
 }
 \value{
-List with p-value and additional statistics
+List with one entry per change point (raw, Bonferroni and BH
+  adjusted p-values)
 }
 \description{
 Compute p-values, adjust for multiple testing, and assess significance.
 Supports Wilks' asymptotic test, permutation, and bootstrap methods.
-Compute P-value for Change Point Detection
+Compute P-values for Detected Change Points
 }
 \details{
-Compute the p-value for a detected change point using various methods.
+Computes, for each change point of a \code{parrot_result}, the p-value of the
+split held fixed inside the window between the neighbouring change points.
+The resampled statistics use the fit settings stored in the result.
 }
 \examples{
 \dontrun{
-# Detect change point
-result <- detect_single_cp(data$Y, Q = 2, type = "unipartite", 
-                          distribution = "bernoulli")
-
-# Compute p-value using Wilks test
-pval <- compute_pvalue(result, method = "wilks")
-print(pval$pvalue)
+res <- parrot(data$Y, Q = 2, multiple = FALSE, min_segment = 2, compute_pvalues = FALSE)
+compute_pvalue(res, method = "wilks")
 }
 }

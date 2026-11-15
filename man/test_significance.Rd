@@ -7,22 +7,29 @@
 test_significance(
   result,
   alpha = 0.05,
-  adjust = c("BH", "bonferroni", "holm", "BY", "none"),
+  adjust = c("bonferroni", "BH", "holm", "BY", "none"),
+  method = c("permutation", "wilks", "stationary_bootstrap", "bootstrap"),
+  n_perm = 99,
   verbose = FALSE
 )
 }
 \arguments{
-\item{result}{A multi_cp_detection or parrot_result object}
+\item{result}{A parrot_result object}
 
 \item{alpha}{Significance level}
 
 \item{adjust}{Adjustment method for multiple testing}
 
+\item{method}{P-value method passed to \code{\link{compute_pvalue}}}
+
+\item{n_perm}{Number of random permutations / bootstrap samples}
+
 \item{verbose}{Print progress}
 }
 \value{
-List with test results for each change point
+Object of class "cp_significance_test"
 }
 \description{
-Perform hypothesis testing for each detected change point.
+Tests every change point of a \code{parrot_result} (see
+\code{\link{compute_pvalue}}) and adjusts for multiple testing.
 }

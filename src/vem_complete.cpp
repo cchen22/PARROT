@@ -105,6 +105,7 @@ List fit_vem_bipartite_weighted_cpp(
     int iter = 0;
     
     for (iter = 0; iter < max_iter; iter++) {
+      if (iter > 0) {
       // E-step: Update tau1
       NumericMatrix new_tau1(N1, Q1);
       for (int i = 0; i < N1; i++) {
@@ -157,6 +158,7 @@ List fit_vem_bipartite_weighted_cpp(
       }
       tau2 = new_tau2;
       
+      }
       // M-step: Update mu and sigma
       NumericMatrix weight_sum(Q1, Q2);
       NumericMatrix mu_new(Q1, Q2);
@@ -371,6 +373,7 @@ List fit_vem_unipartite_weighted_cpp(
     int iter = 0;
     
     for (iter = 0; iter < max_iter; iter++) {
+      if (iter > 0) {
       // E-step: Update tau
       NumericMatrix new_tau(N, Q);
       for (int i = 0; i < N; i++) {
@@ -398,6 +401,7 @@ List fit_vem_unipartite_weighted_cpp(
       }
       tau = new_tau;
       
+      }
       // M-step: Update mu and sigma (use upper triangle, then symmetrize)
       NumericMatrix weight_sum(Q, Q);
       NumericMatrix mu_new(Q, Q);
